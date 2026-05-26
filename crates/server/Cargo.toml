@@ -1,0 +1,11 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+domain = { path = "../domain" }
+storage = { path = "../storage" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

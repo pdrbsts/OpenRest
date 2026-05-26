@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    @apply bg-zinc-900 text-zinc-100 font-sans h-screen w-screen overflow-hidden;
+  }
+}
