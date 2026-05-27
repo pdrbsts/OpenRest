@@ -157,10 +157,13 @@ Se houver apenas 1 família e 1 sub-família com <56 artigos, modo "uma família
 - Pesquisa rápida por nº telefone (com sintaxe especial), morada, nome
 - Histórico dos 3 últimos pedidos do cliente, com botão "copiar pedido"
 - Observações específicas: pedido, factura, cliente, morada
+- Requer configuração de **Áreas de Entrega** (zonas geográficas com respectiva taxa de entrega) e de **Entregadores** (lista de nomes dos "motoboys", que podem ser recursos externos em vez de empregados regulares).
 - Janela de **Despacho**: atribui pedidos a entregadores, imprime documento, mede tempos de preparação e entrega
 
 #### Consumo Próprio
-- Mesa especial automática por empregado
+- Mesa especial automática por empregado (tipicamente para o consumo dos próprios funcionários)
+- Normalmente existem produtos gratuitos e outros pagos a preço reduzido
+- O local associado a este modo usa habitualmente uma tabela de preços (PVP) diferente dos restantes
 - Restrições: não fecha mesa avulsa (fecha com fecho de sessão), não imprime consulta, não transfere, oferta pelo `base_ofertas`
 - Valor consumido vs valor a pagar diferenciados (PVP × percentagem)
 
@@ -332,3 +335,14 @@ Mensagens de erro são também enviadas ao display do comando.
 Configuráveis para serem também impressas:
 - **Movimentação**: erros normais durante pedidos ("Mesa XX não existe")
 - **Sessão**: erros relacionados com abrir/fechar/mudar sessão
+
+## 19. Sincronização com Ecrã de Cliente
+
+Quando um posto está configurado com um ecrã de cliente secundário (Customer Display), o comportamento operacional reflete-se nesse ecrã de acordo com as seguintes regras de sincronização:
+
+- **Atualização em Tempo Real**: Cada linha introduzida e validada pelo operador no ecrã principal (após seleção de artigo e quantidade) surge imediatamente na área de "Conta Atual" do ecrã de cliente, não sendo necessário aguardar pelo "Sub-total".
+- **Ocultação de Dados (Privacidade Operacional)**: Operações sensíveis ou exclusivas do operador (como os diálogos de Anular, Cancelar, ou Transferir) não apresentam a janela modal ao cliente. O ecrã do cliente reflete apenas o resultado final na lista de consumo (ex: a linha é removida da lista ou riscada e o total é reduzido de imediato).
+- **Transição de Estados**:
+  - **Mesa Livre / Terminal Bloqueado**: O ecrã de cliente entra em modo "Standby", ocultando a área da conta e expandindo a Zona de Marketing para ecrã inteiro.
+  - **Ecrã de Recebimento**: Assim que o operador inicia o pagamento, o ecrã de cliente foca-se no Total a Pagar e nos métodos de pagamento selecionados.
+  - **Pós-Pagamento**: O ecrã destaca o Valor Recebido e o Troco. Esta informação mantém-se visível por um período de tempo configurável (ex: 10 segundos) após a confirmação, antes de o ecrã regressar ao modo Standby.

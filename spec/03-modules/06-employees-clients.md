@@ -48,6 +48,8 @@ Configurações relacionadas (caixa):
 
 ### 1.5 Consumo Próprio
 
+Tipicamente, refere-se ao consumo dos próprios funcionários. Normalmente há produtos que não se pagam (gratuitos) e outros que são pagos a um preço reduzido. O local associado ao consumo próprio usa tipicamente uma tabela de preços (PVP) diferente dos restantes locais.
+
 - `Base de Consumo` — valor mensal/diário sem custo
 - `PVP de Consumo` — PVP usado para calcular o valor real consumido
 - `% de Consumo` — percentagem que o empregado paga (do PVP)

@@ -103,9 +103,17 @@ Configurações:
 - Linhas e colunas
 - Mensagem demo (em standby)
 
-OpenRest moderno suporta também:
-- Display tablet/monitor (segundo monitor exclusivo)
-- Display via WebRTC para tablet do cliente
+OpenRest moderno foca-se em ecrãs gráficos completos (Customer Displays):
+
+| Tipo | Uso | Notas |
+|---|---|---|
+| **Segundo Monitor Lógico** | Monitor estendido via HDMI/VGA/USB | O S.O. vê um segundo ecrã. A app POS lança uma janela frameless fullscreen no ecrã secundário (display 2). |
+| **Tablet Cliente (WebRTC/WebSocket)** | Dispositivo Android/iOS independente na rede | Corre um browser em Kiosk Mode ou uma App Leve emparelhada por IP com o posto principal. |
+
+Configurações do Display Gráfico:
+- **Diretório de Media**: Localização (ex: `config/media/customer_display/`) onde residem ficheiros JPG/PNG/MP4 usados em standby.
+- **Resolução e Layout**: Mapeamento pretendido para a grelha de conta vs. zona de marketing (ex: Split 40%/60%, ou ecrã inteiro 1920x1080).
+- **Tempo de Retenção do Troco**: Duração em segundos na qual o ecrã retém a visualização do troco antes de voltar à publicidade.
 
 ### 2.7 Leitores
 

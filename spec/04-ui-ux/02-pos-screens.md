@@ -532,3 +532,32 @@ Ecrã principal → Caixa → Fecha Sessão (cada empregado)
 → se folga: avança data
 → ecrã principal (data nova)
 ```
+
+## 18. Ecrã de Cliente (Segundo Monitor)
+
+Este ecrã é apresentado num monitor secundário virado para o cliente. Não tem controlos interativos (touchscreen desativado ou ignorado no painel do cliente).
+
+```text
++---------------------------------------------------+
+|  [LOGO DA CASA]                    [12:30]        |
++---------------------------------------------------+
+|  (1) CONTA ACTUAL      |  (2) ZONA DE MARKETING   |
+|                        |                          |
+|  1x Café         €1,00 |  +--------------------+  |
+|  1x Bolo         €2,50 |  |                    |  |
+|  2x Cerveja      €4,00 |  |   IMAGEM / VÍDEO   |  |
+|                        |  |    PROMOCIONAL     |  |
+|                        |  |                    |  |
+|  --------------------  |  +--------------------+  |
+|  TOTAL:          €7,50 |                          |
+|                        |  "Peça o nosso menu!"    |
+|                        |                          |
++---------------------------------------------------+
+|  (3) MENSAGEM RODAPÉ: Obrigado pela preferência!  |
++---------------------------------------------------+
+```
+
+Zonas principais:
+1. **Conta Atual**: Apresenta as linhas do pedido em tempo real, descontos aplicados e o valor total. Quando o operador entra no ecrã de pagamento, destaca o valor recebido e o troco.
+2. **Zona de Marketing**: Carousel rotativo de imagens ou vídeos (suporta media local ou via CDN). Pode ser configurada para ecrã inteiro quando a mesa está fechada/inativa (Modo Standby).
+3. **Rodapé**: Mensagem rotativa ou fixa com cumprimentos, horários de funcionamento, ou informações fiscais legais (quando obrigatório).

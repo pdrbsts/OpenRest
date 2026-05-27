@@ -12,6 +12,7 @@ Glossário consolidado de termos do domínio, herdados do WinREST e/ou introduzi
 - **Anulação** — Remoção de um artigo já pedido (já impresso em cozinha). Pode ser *com desperdício* (gasta stock) ou *sem desperdício* (devolve ao stock).
 - **Apuramento** — Mapa impresso com o fecho parcial ou total de uma unidade da hierarquia (sessão, caixa, turno, dia).
 - **Área (de mapa de mesas)** — Imagem de planta de sala com pontos clicáveis associados a mesas. Independente do conceito de Local.
+- **Área de Entrega** — Zona geográfica configurada para o serviço de entrega ao domicílio (Delivery), podendo ter associada uma taxa de entrega específica.
 - **Artigo** — Linha de catálogo vendável. Tem código, designação, preço, IVA, zona de impressão, tipo, complementos, etc.
 - **Artigo em Automático** — Artigo que é inserido automaticamente numa mesa em determinados eventos (abertura, fecho, início do dia, pedido de outro artigo associado).
 - **Artigo Informativo** — Artigo sem preço; aparece no talão para cozinha mas não na conta do cliente.
@@ -45,7 +46,7 @@ Glossário consolidado de termos do domínio, herdados do WinREST e/ou introduzi
 - **Complemento** — Artigo que acompanha um principal (ex: "Bem passado", "Sem cebola"). Imprime na mesma zona do principal por defeito.
 - **Compras (movimento de caixa)** — Saída de dinheiro da caixa para aquisição de bens/serviços.
 - **Conta Corrente (CC)** — Saldo a crédito/débito de um cliente ou empregado.
-- **Consumo Próprio** — Operação em que um empregado regista o seu próprio consumo. Pode ter PVP e descontos especiais.
+- **Consumo Próprio** — Operação em que um empregado regista o seu próprio consumo (tipicamente consumo dos funcionários). Normalmente há produtos gratuitos e outros pagos a preço reduzido. Este local utiliza habitualmente uma tabela de preços (PVP) diferente dos restantes locais.
 - **Consulta de Mesa** — Documento informativo com o consumo actual da mesa. Não tem valor fiscal.
 - **Cronograma de Reservas** — Vista temporal das reservas (mensal/diária).
 
@@ -62,6 +63,7 @@ Glossário consolidado de termos do domínio, herdados do WinREST e/ou introduzi
 - **Empregado** — Utilizador do sistema. Tem código, password, cartão, nível de acesso, comissões, mesas atribuídas.
 - **Empréstimo (movimento de caixa)** — Entrada de dinheiro do empregado para a caixa, criando crédito na CC do empregado.
 - **Encaixe de promoções** — Modo de local em que se pode pedir uma promoção sem todos os seus itens, completando-a depois ("o café fica para depois").
+- **Entregador / Motoboy** — Responsável por efectuar entregas ao domicílio (Delivery). Não necessita ser um empregado da empresa, podendo ser um prestador de serviços externo.
 - **Envelope / Depósito** — Operação informativa que regista o ensacamento de dinheiro retirado da caixa, mas continua contabilizado como em caixa até ao fecho do dia.
 - **Estorno** — Anulação de documento já fechado. Existe estorno com e sem desperdício.
 - **Exclusão** — Configuração que esconde famílias, artigos ou empregados num determinado posto ou local; também pode esconder operações (transferir, fechar).
@@ -209,6 +211,7 @@ Glossário consolidado de termos do domínio, herdados do WinREST e/ou introduzi
 - **Take-Away Seguro** — Variante: total só é mostrado ao premir confirmação; ideal para evitar fraudes.
 - **Tamanho (de artigo)** — Atributo (pequeno/médio/grande) usado para escolher complemento compatível.
 - **Tara** — Peso a subtrair em artigos pesados em balança.
+- **Taxa de Entrega** — Valor cobrado pelo serviço de Delivery, que pode variar dependendo da Área de Entrega.
 - **Taxa de IVA** — Há 9 códigos (1..9). Cada artigo tem 2 atribuições: IVA na Mesa e IVA Venda Directa.
 - **Tempo Extra (entre mensagens)** — Atraso aplicado a comunicação com antena rádio para tolerar USB→Serial.
 - **Terminal Adapter (TA)** — Adaptador RDIS para identificação de chamadas (delivery).
