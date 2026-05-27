@@ -211,7 +211,7 @@ Identifica utilizadores que operam o sistema.
 | `peso_unitario` | weight | |
 | `mostra_complementos_automaticos` | bool | |
 | `cor_botao` | colour | |
-| `imagem` | path | |
+| `imagem` | blob | |
 | `anulado_em` | timestamp | |
 
 ### 4.4 `artigo`
@@ -241,7 +241,7 @@ Identifica utilizadores que operam o sistema.
 | `peso_unitario` | weight | |
 | `codigo_barras` | string(13) | Múltiplos códigos permitidos (tabela auxiliar) |
 | `cor_botao` | colour | |
-| `imagem` | path | |
+| `imagem` | blob | |
 | `classe_dispositivo` | int | Para máquina de café (acerto, dose…) |
 | `taxa_servico_percentagem` | decimal(5,2) | Só para tipo=gorjeta |
 | `taxa_servico_base` | money | |
@@ -311,10 +311,14 @@ Conjunto lógico de mesas com configuração própria.
 | `permite_mesas_abertas_fim_do_dia` | bool | |
 | `pode_identificar_cliente_no_pedido` | bool | |
 | `obriga_indicar_valor_pago` | bool | |
+| `usa_desenho_mesas` | bool | |
+| `imagem` | blob | Imagem de fundo se usa_desenho_mesas |
+| `largura` | int | Largura da área de desenho |
+| `altura` | int | Altura da área de desenho |
 | `anulado_em` | timestamp | |
 
 ### 4.10 `mesa`
-Cada mesa tem identidade própria (não é só um número), para suportar histórico, nomes excepcionais e mapas.
+Define a configuração estática e visual de uma mesa no sistema.
 
 | Campo | Tipo | Notas |
 |---|---|---|
@@ -322,29 +326,25 @@ Cada mesa tem identidade própria (não é só um número), para suportar histó
 | `local_id` | FK | |
 | `codigo` | int | Único por local |
 | `nome` | string(30) | Sobrepõe-se ao genérico se != null |
-| `na_lista_negra` | bool | |
+| `nomeobjecto` | string | |
+| `posx` | int | |
+| `posy` | int | |
+| `imagem` | blob | |
+| `fntname` | string | |
+| `fntsize` | int | |
+| `fntcolor` | colour | |
+| `fontx` | int | |
+| `fonty` | int | |
+| `fontstyle` | string | |
+| `estadox` | int | |
+| `estadoy` | int | |
+| `reservax` | int | |
+| `reservay` | int | |
+| `altura` | int | |
+| `largura` | int | |
 | `criada_em` | timestamp | |
-| `acumulado_dia_tempo_seg` | int | Calculado |
-| `acumulado_dia_pessoas` | int | Calculado |
-| `acumulado_dia_utilizacoes` | int | Calculado |
-| `acumulado_dia_facturado` | money | Calculado |
 
-### 4.11 `mapa_mesas_area`
-| Campo | Tipo | Notas |
-|---|---|---|
-| `id` | uuid | |
-| `nome` | string | |
-| `imagem` | path | BMP 24bit / PNG; recomendado 580×560 |
-| `largura_px`, `altura_px` | int | |
-
-### 4.12 `mapa_mesas_ponto`
-| Campo | Tipo | Notas |
-|---|---|---|
-| `area_id` | FK | |
-| `mesa_id` | FK | |
-| `x`, `y` | int | Coordenadas em pixéis (até 10 pontos por mesa) |
-
-### 4.13 `posto`
+### 4.11 `posto`
 | Campo | Tipo | Notas |
 |---|---|---|
 | `id` | uuid | |
@@ -484,58 +484,24 @@ Sumário por taxa de IVA (snapshot impresso na factura/VD).
 
 ## 6. Operação (mesas vivas)
 
-### 6.1 `mesa_sessao`
-Equivale a "uma vida da mesa", desde a abertura até ao fecho.
-
-| Campo | Tipo | Notas |
-|---|---|---|
-| `id` | uuid | |
-| `mesa_id` | FK | |
-| `aberta_em` | timestamp | |
-| `aberta_por_empregado_id` | FK | |
-| `empregado_actual_id` | FK | |
-| `numero_pessoas` | int | |
-| `estado` | enum | aberta, com_sub_total_impresso, em_espera, reservada, fechada |
-| `cliente_associado_id` | FK | Nullable |
-| `cliente_eventual_snapshot` | json | NIF/Nome para D.Externos sem ficha |
-| `subtotal_actual` | money | Calculado |
-| `fechada_em` | timestamp | |
-| `documento_id` | FK | Nullable até ao fecho |
-
-### 6.2 `mesa_sessao_detalhe`
-Mesma estrutura conceptual que `documento_detalhe`, mas representa estado *vivo* da mesa.
-
-> **Implementação alternativa**: tudo é `documento_detalhe` desde o pedido, mas marcado como "estado=pendente" até ao fecho. Decisão técnica em `02-data-model/03-design-decisions.md`.
-
-### 6.3 `reserva`
-| Campo | Tipo | Notas |
-|---|---|---|
-| `id` | uuid | |
-| `data_inicio` | date | |
-| `data_fim` | date | |
-| `hora_inicio` | time | |
-| `hora_fim` | time | |
-| `mesas` | array<FK mesa> | |
-| `cliente_id` | FK | Nullable |
-| `cliente_nome` | string | Snapshot |
-| `cliente_telefone` | string | Snapshot |
-| `numero_pessoas` | int | |
-| `observacoes` | text | |
-| `estado` | enum | activa, cancelada, consumida, expirada |
-| `loja_destino_id` | FK loja | Cross-store |
-
-### 6.4 `lista_negra_mesa`
-Tabela de mesas/cartões bloqueados.
+### 6.1 `mesa_estado`
+Estado dinâmico e vivo da mesa (aberta, bloqueada, reservada).
 
 | Campo | Tipo | Notas |
 |---|---|---|
 | `mesa_id` | FK | PK |
-| `motivo` | text | |
-| `bloqueada_em` | timestamp | |
-| `bloqueada_por` | FK empregado | |
-
-### 6.5 `mesa_acumulado_dia`
-Snapshot diário para estatísticas.
+| `estado` | enum | livre, aberta, em_espera, reservada, bloqueada |
+| `bloqueada_por_posto_id` | FK posto | |
+| `bloqueada_motivo` | text | |
+| `cliente_associado_id` | FK | Cliente atribuído à mesa |
+| `numero_pessoas` | int | |
+| `empregado_actual_id` | FK | |
+| `aberta_em` | timestamp | |
+| `subtotal_actual` | money | |
+| `reservada_ate` | timestamp | |
+| `reserva_pessoas` | int | |
+| `reserva_cliente_id` | FK | |
+| `reserva_observacoes` | text | |
 
 ---
 

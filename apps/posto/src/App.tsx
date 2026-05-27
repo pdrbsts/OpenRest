@@ -6,11 +6,13 @@ import {
   CatalogResponse,
   DocumentResponse,
   Family,
+  Local,
   PaymentMethod,
   Table,
 } from "./api";
+import { ConfigView } from "./ConfigView";
 
-type View = "tables" | "order";
+type View = "tables" | "order" | "config";
 
 const fmtMoney = (cents: number) => (cents / 100).toFixed(2) + "€";
 
@@ -38,7 +40,25 @@ function familySubtree(families: Family[], rootId: string): Set<string> {
 
 function App() {
   const [catalog] = createResource<CatalogResponse>(() => api.catalog());
+  const [locais, { refetch: refetchLocais }] = createResource<Local[]>(() =>
+    api.locais()
+  );
+  const [selectedLocal, setSelectedLocal] = createSignal<string | null>(null);
+
+  // pick first local by default once loaded
+  createMemo(() => {
+    if (selectedLocal() === null) {
+      const list = locais();
+      if (list && list.length > 0) setSelectedLocal(list[0].id);
+    }
+  });
+
   const [tables, { refetch: refetchTables }] = createResource<Table[]>(() => api.tables());
+  const visibleTables = createMemo(() => {
+    const all = tables() ?? [];
+    const local = selectedLocal();
+    return local ? all.filter((t) => t.local_id === local) : all;
+  });
   const [paymentMethods] = createResource<PaymentMethod[]>(() => api.paymentMethods());
 
   const [view, setView] = createSignal<View>("tables");
@@ -138,6 +158,7 @@ function App() {
         onTables={() => setView("tables")}
         canOrder={!!activeTable()}
         onOrder={() => setView("order")}
+        onConfig={() => setView("config")}
       />
 
       <div class="flex-1 flex flex-col h-full bg-zinc-950">
@@ -154,10 +175,29 @@ function App() {
         </Show>
 
         <div class="flex-1 flex overflow-hidden">
+          <Show when={view() === "config"}>
+            <ConfigView
+              locais={locais() ?? []}
+              tablesByLocal={Object.fromEntries(
+                (locais() ?? []).map((l) => [
+                  l.id,
+                  (tables() ?? []).filter((t) => t.local_id === l.id),
+                ])
+              )}
+              onChanged={async () => {
+                await refetchLocais();
+                await refetchTables();
+              }}
+            />
+          </Show>
+
           <Show when={view() === "tables"}>
             <TablesView
-              tables={tables() ?? []}
-              loading={tables.loading}
+              locais={locais() ?? []}
+              selectedLocal={selectedLocal()}
+              onPickLocal={(id) => setSelectedLocal(id)}
+              tables={visibleTables()}
+              loading={tables.loading || locais.loading}
               busy={busy()}
               onPick={openTable}
             />
@@ -196,6 +236,7 @@ function Sidebar(props: {
   canOrder: boolean;
   onTables: () => void;
   onOrder: () => void;
+  onConfig: () => void;
 }) {
   const active = "bg-blue-600 hover:bg-blue-500 text-white";
   const inactive = "bg-zinc-700 hover:bg-zinc-600 text-zinc-300";
@@ -217,6 +258,15 @@ function Sidebar(props: {
         } disabled:opacity-40 disabled:cursor-not-allowed`}
       >
         Pedido
+      </button>
+      <div class="flex-1" />
+      <button
+        onClick={props.onConfig}
+        class={`w-16 h-16 rounded-xl transition-colors shadow-lg flex items-center justify-center font-semibold text-sm ${
+          props.view === "config" ? active : inactive
+        }`}
+      >
+        Config
       </button>
     </div>
   );
@@ -254,42 +304,84 @@ function TopBar(props: {
 }
 
 function TablesView(props: {
+  locais: Local[];
+  selectedLocal: string | null;
+  onPickLocal: (id: string) => void;
   tables: Table[];
   loading: boolean;
   busy: boolean;
   onPick: (t: Table) => void;
 }) {
+  const stateColors: Record<string, string> = {
+    livre: "bg-zinc-800 border-zinc-700 hover:border-blue-500 hover:bg-zinc-700",
+    aberta: "bg-amber-600/30 border-amber-500 hover:bg-amber-600/50",
+    em_espera: "bg-purple-700/30 border-purple-500 hover:bg-purple-700/50",
+    reservada: "bg-sky-700/30 border-sky-500 hover:bg-sky-700/50",
+    bloqueada: "bg-red-700/30 border-red-500 hover:bg-red-700/50",
+  };
+  const stateLabel: Record<string, string> = {
+    livre: "Livre",
+    aberta: "Aberta",
+    em_espera: "Em espera",
+    reservada: "Reservada",
+    bloqueada: "Bloqueada",
+  };
   return (
-    <div class="flex-1 p-6 overflow-y-auto bg-zinc-950">
-      <h2 class="text-xl font-bold text-zinc-200 mb-4">Escolher mesa</h2>
-      <Show when={!props.loading} fallback={<div class="text-zinc-400">A carregar…</div>}>
-        <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-4">
-          <For each={props.tables}>
-            {(t) => (
-              <button
-                onClick={() => props.onPick(t)}
-                disabled={props.busy}
-                class={`aspect-square rounded-2xl border p-4 flex flex-col justify-between items-start text-left shadow-md transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none ${
-                  t.is_open
-                    ? "bg-amber-600/30 border-amber-500 hover:bg-amber-600/50"
-                    : "bg-zinc-800 border-zinc-700 hover:border-blue-500 hover:bg-zinc-700"
-                }`}
-              >
-                <span class="text-2xl font-bold text-zinc-100 leading-tight">
-                  {t.name ?? `Mesa ${t.code}`}
-                </span>
-                <span
-                  class={`text-xs font-mono uppercase tracking-wider ${
-                    t.is_open ? "text-amber-300" : "text-zinc-500"
-                  }`}
-                >
-                  {t.is_open ? "Aberta" : "Livre"}
-                </span>
-              </button>
-            )}
-          </For>
-        </div>
-      </Show>
+    <div class="flex-1 flex flex-col overflow-hidden bg-zinc-950">
+      <div class="flex gap-2 p-3 border-b border-zinc-800 overflow-x-auto bg-zinc-900">
+        <For each={props.locais}>
+          {(l) => (
+            <button
+              onClick={() => props.onPickLocal(l.id)}
+              class={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${
+                props.selectedLocal === l.id
+                  ? "bg-blue-600 text-white shadow"
+                  : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+              }`}
+            >
+              <span>{l.designacao}</span>
+              <span class="ml-2 text-xs uppercase tracking-wider text-zinc-400">
+                {l.tipo.replace("_", " ")}
+              </span>
+            </button>
+          )}
+        </For>
+      </div>
+      <div class="flex-1 p-6 overflow-y-auto">
+        <h2 class="text-xl font-bold text-zinc-200 mb-4">Escolher mesa</h2>
+        <Show when={!props.loading} fallback={<div class="text-zinc-400">A carregar…</div>}>
+          <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-4">
+            <For each={props.tables}>
+              {(t) => {
+                const estado = t.estado.estado;
+                return (
+                  <button
+                    onClick={() => props.onPick(t)}
+                    disabled={props.busy || estado === "bloqueada"}
+                    class={`aspect-square rounded-2xl border p-4 flex flex-col justify-between items-start text-left shadow-md transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none ${
+                      stateColors[estado] ?? stateColors.livre
+                    }`}
+                  >
+                    <span class="text-2xl font-bold text-zinc-100 leading-tight">
+                      {t.name ?? `Mesa ${t.code}`}
+                    </span>
+                    <div class="w-full flex justify-between items-baseline">
+                      <span class="text-xs font-mono uppercase tracking-wider text-zinc-300">
+                        {stateLabel[estado] ?? estado}
+                      </span>
+                      <Show when={t.estado.subtotal_actual > 0}>
+                        <span class="text-xs font-mono text-zinc-200">
+                          {fmtMoney(t.estado.subtotal_actual)}
+                        </span>
+                      </Show>
+                    </div>
+                  </button>
+                );
+              }}
+            </For>
+          </div>
+        </Show>
+      </div>
     </div>
   );
 }

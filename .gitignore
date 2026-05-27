@@ -17,3 +17,4 @@ openrest_signing.pem
 # Other
 receipts.txt
 node_modules/
+.claude/

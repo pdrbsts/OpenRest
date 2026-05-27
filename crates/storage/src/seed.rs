@@ -90,28 +90,95 @@ pub async fn seed_if_empty(pool: &SqlitePool) -> Result<bool, StorageError> {
         .await?;
     }
 
+    // Local default "Salão Principal" — modo normal, 12 mesas.
+    let local_salao = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO locais (id, designacao, mesas_definicao, tipo, nome_generico_mesa) \
+         VALUES (?1, 'Salão Principal', '1:99', 'normal', 'Mesa {nm}')",
+    )
+    .bind(local_salao.to_string())
+    .execute(&mut *tx)
+    .await?;
+
     for code in 1..=12 {
         sqlx::query(
-            "INSERT INTO tables (id, code, name, is_open) VALUES (?1, ?2, ?3, 0)",
+            "INSERT INTO tables (id, local_id, code, name, criada_em) VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(Uuid::new_v4().to_string())
+        .bind(local_salao.to_string())
         .bind(code as i64)
         .bind(format!("Mesa {}", code))
+        .bind(now)
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("INSERT INTO tables (id, code, name, is_open) VALUES (?1, 99, 'Balcão', 0)")
+
+    // Local Take-Away "Balcão"
+    let local_balcao = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO locais (id, designacao, tipo, nome_generico_mesa) \
+         VALUES (?1, 'Balcão', 'take_away', 'Balcão {nm}')",
+    )
+    .bind(local_balcao.to_string())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tables (id, local_id, code, name, criada_em) VALUES (?1, ?2, 1, 'Balcão', ?3)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(local_balcao.to_string())
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    // Local Delivery
+    let local_delivery = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO locais (id, designacao, tipo, nome_generico_mesa) \
+         VALUES (?1, 'Delivery', 'delivery', 'Pedido {nm}')",
+    )
+    .bind(local_delivery.to_string())
+    .execute(&mut *tx)
+    .await?;
+
+    // Local Consumo Próprio
+    let local_consumo = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO locais (id, designacao, tipo, nome_generico_mesa) \
+         VALUES (?1, 'Pessoal', 'consumo_proprio', 'Consumo {nm}')",
+    )
+    .bind(local_consumo.to_string())
+    .execute(&mut *tx)
+    .await?;
+
+    // Empregados: Admin paga 100% no consumo, Empregado tem 50% de desconto.
+    for (code, name, perc) in [(1, "Admin", 10000_i64), (2, "Empregado", 5000_i64)] {
+        sqlx::query(
+            "INSERT INTO employees (id, code, name, perc_consumo) VALUES (?1, ?2, ?3, ?4)",
+        )
         .bind(Uuid::new_v4().to_string())
+        .bind(code as i64)
+        .bind(name)
+        .bind(perc)
         .execute(&mut *tx)
         .await?;
+    }
 
-    for (code, name) in [(1, "Admin"), (2, "Empregado")] {
-        sqlx::query("INSERT INTO employees (id, code, name) VALUES (?1, ?2, ?3)")
-            .bind(Uuid::new_v4().to_string())
-            .bind(code as i64)
-            .bind(name)
-            .execute(&mut *tx)
-            .await?;
+    // Clientes-exemplo
+    for (nome, telefone, morada) in [
+        ("Cliente Frequente", "915551111", "Rua das Flores, 5"),
+        ("João Silva", "936669999", "Av. da República, 100"),
+    ] {
+        sqlx::query(
+            "INSERT INTO clientes (id, nome, telefone, morada, localidade) \
+             VALUES (?1, ?2, ?3, ?4, 'Lisboa')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(nome)
+        .bind(telefone)
+        .bind(morada)
+        .execute(&mut *tx)
+        .await?;
     }
 
     for (code, name) in [(1, "Numerário"), (2, "Multibanco")] {
