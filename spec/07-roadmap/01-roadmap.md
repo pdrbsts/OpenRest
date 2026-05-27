@@ -49,9 +49,10 @@ Entregas:
 - Documento de Pedido + Consulta de Mesa
 - Impressora genérica ESC/POS
 - Configuração mínima
+- Fatura legal PT (QR Code, ATCUD, dados fiscais da empresa)
 
 Critérios de saída:
-- Posso vender 1 produto, ver na consulta de mesa, fechar, imprimir
+- Posso vender 1 produto, ver na consulta de mesa, fechar, imprimir fatura legal PT
 - Latência alvo cumprida nos fluxos básicos
 
 ## Fase 2 — POS Funcional Completo (M6 – M9)
@@ -81,6 +82,7 @@ Entregas:
 - Templates VD e Factura
 - Caixa básica (abrir, fechar)
 - Sessões de empregados
+- Comunicação de séries com a AT por webservice
 
 Critérios de saída:
 - Loja-piloto consegue operar um dia completo

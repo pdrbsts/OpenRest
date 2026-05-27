@@ -1,3 +1,19 @@
 /target
 **/*.rs.bk
 Cargo.lock
+GEMINI.md
+CLAUDE.md
+
+# Database
+openrest.db*
+
+# Config
+openrest.toml
+.env
+
+# Secrets
+openrest_signing.pem
+
+# Other
+receipts.txt
+node_modules/

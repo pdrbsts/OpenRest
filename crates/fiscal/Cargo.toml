@@ -1,0 +1,14 @@
+[package]
+name = "fiscal"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rsa = { version = "0.9", features = ["sha1"] }
+sha1 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+thiserror = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+qrcode = { version = "0.14", default-features = false }

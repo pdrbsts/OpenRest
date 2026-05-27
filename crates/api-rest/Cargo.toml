@@ -7,6 +7,8 @@ edition = "2021"
 domain = { path = "../domain" }
 storage = { path = "../storage" }
 server = { path = "../server" }
+devices = { path = "../devices" }
+fiscal = { path = "../fiscal" }
 axum = "0.7"
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -14,3 +16,5 @@ serde_json = "1.0"
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+thiserror = { workspace = true }

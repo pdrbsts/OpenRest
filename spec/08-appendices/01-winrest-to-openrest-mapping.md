@@ -63,6 +63,7 @@
 | WRSTENVO.000 | envelope |
 | WRSTRANK.000 | complemento_recente |
 | WRSTDATA.000 | definicoes_gerais.data_logica |
+| WRSTATCU.000 | chaves ATCUD atribuidas pela AT|
 | IBERSALD.000 | fecho_financeiro_saldo |
 
 ## Configurações `winrest.ini` → `openrest.toml`

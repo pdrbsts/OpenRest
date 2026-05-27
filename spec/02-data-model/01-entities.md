@@ -190,8 +190,8 @@ Identifica utilizadores que operam o sistema.
 | Campo | Tipo | Notas |
 |---|---|---|
 | `id` | uuid | |
-| `codigo` | int(4) | Família ≡ múltiplo de 100 (600, 700). Sub-família ≡ outros. |
-| `familia_superior_id` | FK familia | Nullable para família raiz |
+| `codigo` | int(4) | Família de topo ≡ múltiplo de 100 (600, 700). |
+| `familia_superior_id` | FK familia | Nullable para família raiz. Permite hierarquia em vários níveis (N níveis de sub-famílias). |
 | `nome_curto` | string(10) | |
 | `designacao` | string(40) | |
 | `nome_botao` | string(20) | |
@@ -219,7 +219,7 @@ Identifica utilizadores que operam o sistema.
 |---|---|---|
 | `id` | uuid | |
 | `codigo` | int(4) | |
-| `familia_id` | FK | Sub-família |
+| `familia_id` | FK familia | Pode ser associado a qualquer nível da hierarquia de famílias |
 | `codigo_pedido` | int | Código curto para teclado |
 | `nome_curto` | string(10) | |
 | `designacao` | string(40) | |
@@ -878,7 +878,21 @@ Singleton com todas as flags globais (formato dinheiro, língua, zona, Qt. máxi
 | `comunicada_at` | bool | PT — comunicada à AT |
 | `atcud_validacao` | string | Código devolvido pela AT |
 
-### 11.4 `loja`
+### 11.4 `atcud`
+Códigos ATCUD atribuídos pela Autoridade Tributária.
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `id` | uuid | |
+| `tipodoc` | enum | |
+| `serie` | string | |
+| `ano` | int | |
+| `atcud` | string | Código de validação ATCUD |
+| `data_inicio` | date | Data de início de vigência |
+| `data_registo` | timestamp | |
+| `ativo` | bool | |
+
+### 11.5 `loja`
 Em modelos multi-loja.
 
 | Campo | Tipo | Notas |
@@ -892,7 +906,7 @@ Em modelos multi-loja.
 | `moeda` | iso4217 | |
 | `fuso_horario` | string | |
 
-### 11.5 `pais_locale`
+### 11.6 `pais_locale`
 Configuração de regras nacionais.
 
 | Campo | Tipo | Notas |
@@ -900,7 +914,7 @@ Configuração de regras nacionais.
 | `pais` | iso2 | PT, ES, BR, SE, TR, … |
 | `regras` | json | {iva_em_detalhe_obrigatorio, atcud_obrigatorio, nif_obrigatorio_acima_de, saft_export, hash_assinatura, datas_dd_mm_aaaa, simbolos_moeda} |
 
-### 11.6 `event_log`
+### 11.7 `event_log`
 *Audit trail* universal.
 
 | Campo | Tipo | Notas |

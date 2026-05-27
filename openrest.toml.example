@@ -1,0 +1,20 @@
+# Configuração do backend OpenRest (copia para openrest.toml para personalizar).
+bind = "0.0.0.0:3000"
+database_path = "./openrest.db"
+printer_output_path = "./receipts.txt"
+terminal_label = "Terminal 1"
+signing_key_path = "./openrest_signing.pem"
+
+[company]
+nif = "999999990"
+legal_name = "OpenRest Demo, Lda."
+trade_name = "OpenRest Demo"
+address = "Rua de Exemplo, 1"
+postal_code = "1000-001"
+city = "Lisboa"
+country = "PT"
+share_capital_cents = 500000          # 5.000,00 EUR
+registry_office = "Conservatória de Lisboa"
+registry_number = "999999990"
+software_certificate = "0000/AT"      # placeholder até certificação real
+default_vat_rate = 1300               # basis points (13%)

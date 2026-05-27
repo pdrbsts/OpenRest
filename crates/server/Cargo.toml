@@ -6,6 +6,10 @@ edition = "2021"
 [dependencies]
 domain = { path = "../domain" }
 storage = { path = "../storage" }
+fiscal = { path = "../fiscal" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+rsa = "0.9"

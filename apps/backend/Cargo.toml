@@ -8,7 +8,11 @@ api-rest = { path = "../../crates/api-rest" }
 server = { path = "../../crates/server" }
 domain = { path = "../../crates/domain" }
 storage = { path = "../../crates/storage" }
+fiscal = { path = "../../crates/fiscal" }
 axum = "0.7"
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { workspace = true }
+toml = "0.8"
+anyhow = "1"
