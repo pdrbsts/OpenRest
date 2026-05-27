@@ -253,7 +253,7 @@ Se `indica_pessoas_obrigatorio` na origem e destino, o sistema também redistrib
 
 ## 10. Anulação
 
-Janela idêntica à de transferência mas para anular.
+Janela idêntica à de transferência mas para anular. Exige permissão de empregado `pedidos.anula`. Se a conta (sub-total) já tiver sido impressa, exige adicionalmente a permissão `pedidos.anula.com_conta_impressa`.
 
 Campos:
 - Lista de artigos
@@ -265,7 +265,7 @@ Confirmação imprime pedido de anulação na zona original.
 
 ## 11. Cancelar
 
-Remove linhas do pedido em construção (antes de pedir). Não imprime nada.
+Remove linhas do pedido em construção (antes de pedir). Esta operação exige a permissão de empregado `pedidos.cancelar`. Não imprime nada em zonas de preparação. O seu registo em base de dados (numa tabela de cancelamentos/auditoria) é opcional e configurável de acordo com as preferências do cliente, ao contrário da Anulação que é sempre registada.
 
 ## 12. Oferta (Desconto)
 

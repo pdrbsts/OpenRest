@@ -78,7 +78,7 @@ Para entrega ao domicílio.
 ## 3. Tabelas de parâmetros (Geral)
 
 ### 3.1 `tipo_preco`
-Define os 5 PVPs.
+Define a nomenclatura global dos 5 níveis de PVP. Não contém os preços em si; os valores monetários residem estritamente nas colunas estáticas `pvp1..pvp5` das tabelas `artigo` e `familia`. Não existem tabelas relacionais adicionais de preços.
 
 | Campo | Tipo | Notas |
 |---|---|---|
@@ -233,7 +233,7 @@ Identifica utilizadores que operam o sistema.
 | `grupo_desconto_id` | FK | |
 | `iva_mesa_id` | FK | |
 | `iva_venda_directa_id` | FK | |
-| `pvp1..pvp5` | money | |
+| `pvp1..pvp5` | money | Os 5 preços de venda fixos. Não existem outras tabelas de preços de artigos. |
 | `pvp_variavel` | bool | |
 | `zona_impressao_id` | FK | |
 | `tamanho_id` | FK | |

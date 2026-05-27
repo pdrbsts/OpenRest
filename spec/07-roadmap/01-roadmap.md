@@ -64,7 +64,7 @@ Entregas:
 - Modos: Normal, Take-Away, Delivery, Consumo Próprio
 - Zonas de impressão + mapping
 - Pedidos secundários
-- Anulação (com/sem desperdício)
+- Anulação (com/sem desperdício) e Cancelamento
 - Transferência de mesa
 - Ofertas
 - Pagamento parcial, múltiplos métodos, divisão de conta
@@ -75,7 +75,7 @@ Entregas:
 - Macros
 - Páginas Rápidas
 - Mapa de mesas (clique em imagem)
-- Display de cliente
+- Display de cliente VFD / Monitor de cliente
 - Balança
 - Leitor de cartões e códigos de barras
 - Documentos configuráveis (cabeçalhos/rodapés com flags)

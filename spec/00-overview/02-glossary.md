@@ -9,7 +9,7 @@ Glossário consolidado de termos do domínio, herdados do WinREST e/ou introduzi
 - **Activo (atributo de opção/posto)** — Indica se uma opção está visível e operacional num posto.
 - **Aloca mesas dinamicamente** — Modo de local em que os pedidos entram sempre numa "primeira mesa" e o sistema redistribui-os por mesas livres do local. Útil em discotecas com cartões de consumo.
 - **Alocação circular** — Variante do anterior que escolhe sempre a mesa livre menos utilizada, distribuindo o desgaste.
-- **Anulação** — Remoção de um artigo já pedido (já impresso em cozinha). Pode ser *com desperdício* (gasta stock) ou *sem desperdício* (devolve ao stock).
+- **Anulação** — Remoção de um artigo já pedido (já impresso na impressora para cozinha/bar). É sempre registada numa tabela de anulações. Pode ser *com desperdício* (gasta stock) ou *sem desperdício* (devolve ao stock). Diferente de Cancelamento.
 - **Apuramento** — Mapa impresso com o fecho parcial ou total de uma unidade da hierarquia (sessão, caixa, turno, dia).
 - **Área (de mapa de mesas)** — Imagem de planta de sala com pontos clicáveis associados a mesas. Independente do conceito de Local.
 - **Área de Entrega** — Zona geográfica configurada para o serviço de entrega ao domicílio (Delivery), podendo ter associada uma taxa de entrega específica.
@@ -35,6 +35,7 @@ Glossário consolidado de termos do domínio, herdados do WinREST e/ou introduzi
 - **C/R (Cabeçalho/Rodapé)** — Template usado por um tipo de documento. Para vendas a dinheiro, facturas, pedidos e consultas de mesa existem até 9 templates distintos numeráveis 1–9. Outros tipos têm 1.
 - **Caixa** — Acumulador físico/lógico de dinheiro. Cada gaveta física ≈ uma caixa. Pode haver várias caixas em simultâneo.
 - **Caixa Fixa** — Configuração de posto que força todos os registos desse posto a contabilizar para uma caixa específica, ignorando onde o empregado abriu sessão.
+- **Cancelamento** — Remoção de um artigo introduzido mas que ainda não foi pedido/impresso (ex: inserção de um café por engano, removido antes de pedir o serviço). O seu registo em base de dados é opcional, de acordo com as preferências do cliente.
 - **Carregamento rápido de mesas** — Optimização que carrega só mesas com consumo no arranque (típico em discotecas com 10.000 cartões).
 - **Centro de Custos** — Armazém lógico ao qual é abatido o stock. Associado a uma zona de impressão.
 - **Cliente Associado / Associação** — Cliente cuja conta corrente é paga por outro cliente (ex: empresa, família). Permite agrupar contas.

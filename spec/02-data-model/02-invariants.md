@@ -54,7 +54,7 @@ Dia
 5. Anulação de uma linha já pedida exige permissão `anula_pedidos`; anulação **após sub-total impresso** exige `anula_pedidos.com_conta_impressa`.
 6. Anulação **com desperdício** marca a linha como `anulada_com_desperdicio=true` (gasta stock); sem desperdício devolve ao stock.
 7. Quantidade máxima por linha: `definicoes_gerais.qt_maxima` (anti-engano).
-8. Em artigos com `pvp_variavel=true`, o preço unitário pode ser sobrescrito no pedido.
+8. Os preços base dos artigos residem exclusivamente nas colunas estáticas `pvp1..pvp5` do artigo/família (não existem tabelas relacionais de preços). Em artigos com `pvp_variavel=true`, o preço unitário pode ser sobrescrito no pedido.
 9. Artigos do tipo `informativo` não contribuem para o total da mesa nem aparecem no documento de conta — saem apenas no talão de pedido.
 10. Artigos do tipo `gorjeta` calculam-se como `arredondar(total_actual * percentagem, arredondamento) + base`.
 

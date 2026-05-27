@@ -501,6 +501,13 @@ Ecrã técnico, layout em grelha de ícones:
 +----------------------------------------------------+
 ```
 
+### 16.1 Configuração de Zonas de Impressão e Mapeamento
+
+Por decisão estrutural, para minimizar a fricção com os utilizadores da versão legacy (WinREST) e permitir uma transição suave, o ecrã de configuração de **Zonas de Impressão** mantém exatamente o mesmo paradigma de interface (UI) e a mesma lógica de roteamento cruzado:
+- **Painéis em Cascata**: Os eixos `Origem (Configuração)`, `Zona de Impressão` (incluindo tanto destinos de produção como destinos lógicos de conta: `D. Externos` e `D. Internos`) e `Local` coabitam e são selecionáveis em painéis list-box lado a lado.
+- **Workflow de Seleção**: O utilizador seleciona uma Origem, seleciona a Zona, depois clica no Local. No painel final de `Impressoras`, marca as impressoras que devem processar essa combinação (`Origem x Zona x Local`) através de caixas de seleção.
+- **Overrides Locais**: A mesma filosofia de herança visual é mantida; propriedades como `Agrupamento` e `Tipo de Pedido` colocadas diretamente na impressora sobrepõem-se aos defaults definidos para a Zona.
+
 ## 17. Fluxos cross-screen
 
 ### 17.1 Abrir o dia (servidor)
