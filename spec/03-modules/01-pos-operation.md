@@ -237,14 +237,34 @@ Fluxos:
 - Gera factura/VD apenas com esses artigos
 - Mesa continua aberta
 
-> **Adiado** para iteração seguinte da Fase 2 (requer modelo de documento-filho).
+> **Implementado** em v0.5.0-alpha. Endpoint `POST /api/documents/:id/partial-close` body `{ line_ids, payments }`: cria um documento-filho (`parent_document_id` aponta para o pai), move as linhas seleccionadas, fecha o filho fiscalmente. O pai mantém-se aberto com o saldo. Restrições: linhas têm de estar pedidas (`pedida_em IS NOT NULL`) e não anuladas. O filho **não recebe `table_id`** — só o pai detém a mesa, garantindo que o fecho fiscal do filho não a liberta.
 
 #### Divisão de Conta
 - Introduz nº contas → janela de divisão (manual ou automática)
 - Setas de transferência de artigos entre contas
 - Botão "Divisão Automática" tenta dividir mantendo o total da conta o mais próximo possível do pretendido
 
-> **Adiado** para iteração seguinte da Fase 2.
+> **Implementado** em v0.5.0-alpha. Endpoint `POST /api/documents/:id/split` body `{ assignments: [{ line_ids: […] }, …] }`: cria N filhos (um por entrada de `assignments`), redistribui as linhas. O pai fica **operacionalmente fechado** (`is_closed=true` sem dados fiscais) e a mesa é libertada quando todas as linhas elegíveis foram movidas; cada filho corre na cadeia fiscal de forma independente. `GET /api/documents/:id/split/auto-plan?num_accounts=N` devolve uma sugestão greedy/LPT (Longest Processing Time first) que minimiza a diferença máxima entre contas — a UI mostra o plano e o operador pode ajustar antes de confirmar.
+
+##### Modelo pai/filho
+
+```
+Document (pai, table_id=T, parent_document_id=NULL)
+   ├─ DocumentDetail …  ← linhas originais
+   ↓ split / partial-close move linhas
+Document (filho, table_id=NULL, parent_document_id=pai.id, hash/ATCUD próprios)
+   └─ DocumentDetail (referenciam o filho via UPDATE document_id)
+```
+
+Invariantes:
+* Pai nunca recebe número fiscal, ATCUD ou hash.
+* Filhos têm `table_id IS NULL` para que `finalize_document_fiscal` não liberte a mesa do pai prematuramente.
+* `mesa_estado.subtotal_actual` é decrementado pelo total movido quando linhas saem do pai.
+* Uma divisão exige no mínimo 2 linhas elegíveis (pedidas, não anuladas).
+
+##### Adiado para iteração seguinte
+- Divisão **fraccionária** ("0.5 café em cada uma das 2 contas") — requer migração de `document_details.qty` para milli-unidades ou um modelo de fracções.
+- Modo "Encaixar produtos" (linhas de compensação positivas/negativas) — requer artigo-sistema dedicado e suporte a `total` negativo nas linhas.
 
 ### 8.3 Conta Corrente do Cliente
 

@@ -557,6 +557,10 @@ pub struct Document {
     pub data_dia: Option<NaiveDate>,
     pub sessao_id: Option<Uuid>,
     pub troco_cents: i64,
+    /// Documento-pai operacional quando este Document foi gerado por
+    /// pagamento parcial ou divisão de conta. O pai mantém o histórico das
+    /// linhas; cada filho corre na cadeia fiscal de forma independente.
+    pub parent_document_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -22,6 +22,7 @@ fn document_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Document, StorageE
     let customer_id: Option<String> = row.try_get("customer_id")?;
     let local_id: Option<String> = row.try_get("local_id")?;
     let sessao_id: Option<String> = row.try_get("sessao_id")?;
+    let parent_document_id: Option<String> = row.try_get("parent_document_id").unwrap_or(None);
     Ok(Document {
         id: Uuid::parse_str(row.try_get::<&str, _>("id")?)?,
         table_id: parse_optional_uuid(table_id)?,
@@ -50,6 +51,7 @@ fn document_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Document, StorageE
         data_dia: row.try_get::<Option<NaiveDate>, _>("data_dia")?,
         sessao_id: parse_optional_uuid(sessao_id)?,
         troco_cents: row.try_get::<i64, _>("troco_cents").unwrap_or(0),
+        parent_document_id: parse_optional_uuid(parent_document_id)?,
     })
 }
 
@@ -58,7 +60,7 @@ const DOC_COLS: &str = "id, table_id, employee_id, total, is_closed, created_at,
         previous_hash, issued_at, qr_payload, customer_id, local_id, \
         observacoes_pedido, observacoes_factura, observacoes_cliente, \
         observacoes_morada, delivery_morada, delivery_telefone, subtotal_impresso_em, \
-        data_dia, sessao_id, troco_cents";
+        data_dia, sessao_id, troco_cents, parent_document_id";
 
 pub async fn list_families(pool: &SqlitePool) -> Result<Vec<Family>, StorageError> {
     let rows = sqlx::query("SELECT id, parent_id, code, name FROM families ORDER BY code")
@@ -1075,6 +1077,7 @@ pub async fn open_table(
         data_dia: Some(business_date),
         sessao_id,
         troco_cents: 0,
+        parent_document_id: None,
     })
 }
 
@@ -1338,6 +1341,307 @@ pub async fn record_payments_bulk_tx(
         .execute(&mut **tx)
         .await?;
     Ok((out, troco))
+}
+
+/// Cria um Document filho de um pagamento parcial / divisão de conta. O filho
+/// herda local/empregado/sessão do pai mas **não recebe `table_id`** — isso
+/// garante que o fecho fiscal do filho não liberta a mesa, e o pai mantém a
+/// posse da mesa enquanto restarem linhas por liquidar.
+async fn create_child_document_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    parent: &Document,
+) -> Result<Document, StorageError> {
+    let child_id = Uuid::new_v4();
+    let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO documents (id, table_id, employee_id, total, is_closed, created_at, \
+         local_id, data_dia, sessao_id, parent_document_id) \
+         VALUES (?1, NULL, ?2, 0, 0, ?3, ?4, ?5, ?6, ?7)",
+    )
+    .bind(child_id.to_string())
+    .bind(parent.employee_id.map(|i| i.to_string()))
+    .bind(now)
+    .bind(parent.local_id.map(|i| i.to_string()))
+    .bind(parent.data_dia)
+    .bind(parent.sessao_id.map(|i| i.to_string()))
+    .bind(parent.id.to_string())
+    .execute(&mut **tx)
+    .await?;
+    Ok(Document {
+        id: child_id,
+        table_id: None,
+        employee_id: parent.employee_id,
+        total: 0,
+        is_closed: false,
+        created_at: now,
+        series_id: None,
+        document_type: None,
+        document_number: None,
+        atcud: None,
+        hash: None,
+        hash_short: None,
+        previous_hash: None,
+        issued_at: None,
+        qr_payload: None,
+        customer_id: None,
+        local_id: parent.local_id,
+        observacoes_pedido: None,
+        observacoes_factura: None,
+        observacoes_cliente: None,
+        observacoes_morada: None,
+        delivery_morada: None,
+        delivery_telefone: None,
+        subtotal_impresso_em: None,
+        data_dia: parent.data_dia,
+        sessao_id: parent.sessao_id,
+        troco_cents: 0,
+        parent_document_id: Some(parent.id),
+    })
+}
+
+/// Move um conjunto de linhas pedidas (não anuladas) do pai para um novo
+/// documento-filho. Recalcula totais do pai e do filho na mesma transacção e
+/// decrementa `mesa_estado.subtotal_actual` na medida do total movido (o
+/// crédito permanece "na mesa" apenas enquanto está no pai).
+///
+/// Restrições:
+/// * Linhas devem pertencer a `parent_id`.
+/// * Apenas linhas com `pedida_em IS NOT NULL` e `anulada = 0` são elegíveis
+///   (linhas em construção devem ser canceladas/pedidas antes).
+/// * Pelo menos uma linha tem de ser movida.
+pub async fn move_lines_to_new_document(
+    pool: &SqlitePool,
+    parent_id: Uuid,
+    line_ids: &[Uuid],
+) -> Result<Document, StorageError> {
+    if line_ids.is_empty() {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "no lines selected for partial close".into(),
+        )));
+    }
+    let parent = get_document(pool, parent_id).await?;
+    if parent.is_closed {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "parent document already closed".into(),
+        )));
+    }
+
+    let mut tx = pool.begin().await?;
+    let child = create_child_document_tx(&mut tx, &parent).await?;
+
+    let mut moved_total: i64 = 0;
+    for line_id in line_ids {
+        let row = sqlx::query(
+            "SELECT document_id, total, pedida_em, anulada FROM document_details WHERE id = ?1",
+        )
+        .bind(line_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let owner: String = row.try_get("document_id")?;
+        if Uuid::parse_str(&owner)? != parent_id {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "line does not belong to parent".into(),
+            )));
+        }
+        let pedida_em: Option<DateTime<Utc>> = row.try_get("pedida_em")?;
+        let anulada: bool = row.try_get("anulada")?;
+        if pedida_em.is_none() {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "line not yet ordered (pedida_em NULL)".into(),
+            )));
+        }
+        if anulada {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "anulada lines cannot move".into(),
+            )));
+        }
+        let line_total: i64 = row.try_get("total")?;
+        sqlx::query("UPDATE document_details SET document_id = ?1 WHERE id = ?2")
+            .bind(child.id.to_string())
+            .bind(line_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        moved_total += line_total;
+    }
+
+    sqlx::query("UPDATE documents SET total = total - ?1 WHERE id = ?2")
+        .bind(moved_total)
+        .bind(parent_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE documents SET total = total + ?1 WHERE id = ?2")
+        .bind(moved_total)
+        .bind(child.id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    if let Some(table_id) = parent.table_id {
+        sqlx::query(
+            "UPDATE mesa_estado SET subtotal_actual = subtotal_actual - ?1 WHERE mesa_id = ?2",
+        )
+        .bind(moved_total)
+        .bind(table_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    get_document(pool, child.id).await
+}
+
+#[derive(Debug, Clone)]
+pub struct SplitAssignment {
+    /// Linhas atribuídas a esta conta-filho. Pode ser vazio (filho começa
+    /// vazio — útil quando o operador vai depois mover linhas pela UI).
+    pub line_ids: Vec<Uuid>,
+}
+
+/// Divide um documento em N filhos. O `assignments.len()` define N. O pai
+/// fica marcado `is_closed=true` sem dados fiscais (registo operacional);
+/// cada filho corre na cadeia fiscal de forma independente.
+///
+/// Caller-side concerns:
+/// * `assignments[i].line_ids` é a lista exacta de linhas para o filho i.
+/// * Linhas omitidas das atribuições ficam no pai (que se mantém aberto sem
+///   `is_closed=true` se sobrar pelo menos uma).
+/// * Se TODAS as linhas elegíveis forem atribuídas, o pai fica vazio e é
+///   marcado split-closed; senão fica aberto com as linhas remanescentes.
+pub async fn split_document(
+    pool: &SqlitePool,
+    parent_id: Uuid,
+    assignments: &[SplitAssignment],
+) -> Result<Vec<Document>, StorageError> {
+    if assignments.is_empty() {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "split requires at least one account".into(),
+        )));
+    }
+    let parent = get_document(pool, parent_id).await?;
+    if parent.is_closed {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "parent document already closed".into(),
+        )));
+    }
+
+    // Linhas elegíveis do pai (pedidas e não anuladas). Restantes ficam no pai.
+    let all_lines = list_document_details(pool, parent_id).await?;
+    let eligible: std::collections::HashSet<Uuid> = all_lines
+        .iter()
+        .filter(|l| l.pedida_em.is_some() && !l.anulada)
+        .map(|l| l.id)
+        .collect();
+
+    let mut tx = pool.begin().await?;
+    let mut created = Vec::with_capacity(assignments.len());
+    let mut total_moved: i64 = 0;
+
+    for assignment in assignments {
+        let child = create_child_document_tx(&mut tx, &parent).await?;
+        let mut child_total: i64 = 0;
+        for line_id in &assignment.line_ids {
+            if !eligible.contains(line_id) {
+                return Err(StorageError::Database(sqlx::Error::Protocol(
+                    "line not eligible for split (must be ordered, not anulada, and on parent)"
+                        .into(),
+                )));
+            }
+            let line_total: i64 = sqlx::query("SELECT total FROM document_details WHERE id = ?1")
+                .bind(line_id.to_string())
+                .fetch_one(&mut *tx)
+                .await?
+                .try_get("total")?;
+            sqlx::query("UPDATE document_details SET document_id = ?1 WHERE id = ?2")
+                .bind(child.id.to_string())
+                .bind(line_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            child_total += line_total;
+        }
+        sqlx::query("UPDATE documents SET total = ?1 WHERE id = ?2")
+            .bind(child_total)
+            .bind(child.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        total_moved += child_total;
+        created.push((child, child_total));
+    }
+
+    sqlx::query("UPDATE documents SET total = total - ?1 WHERE id = ?2")
+        .bind(total_moved)
+        .bind(parent_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+    if let Some(table_id) = parent.table_id {
+        sqlx::query(
+            "UPDATE mesa_estado SET subtotal_actual = subtotal_actual - ?1 WHERE mesa_id = ?2",
+        )
+        .bind(total_moved)
+        .bind(table_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Se o pai ficou sem linhas, fecha-o operacionalmente (sem fiscal) e
+    // liberta a mesa. Senão mantém-se aberto para receber pagamentos ou
+    // novos pedidos das linhas que sobraram.
+    let parent_remaining: i64 = sqlx::query("SELECT total FROM documents WHERE id = ?1")
+        .bind(parent_id.to_string())
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("total")?;
+    if parent_remaining == 0 {
+        sqlx::query("UPDATE documents SET is_closed = 1 WHERE id = ?1")
+            .bind(parent_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        if let Some(table_id) = parent.table_id {
+            sqlx::query(
+                "UPDATE mesa_estado SET estado = 'livre', empregado_actual_id = NULL, \
+                 aberta_em = NULL, subtotal_actual = 0 WHERE mesa_id = ?1",
+            )
+            .bind(table_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+
+    // Materializa os filhos com totais persistidos.
+    let mut out = Vec::with_capacity(created.len());
+    for (child, _) in created {
+        out.push(get_document(pool, child.id).await?);
+    }
+    Ok(out)
+}
+
+/// Heurística greedy (LPT) — atribui cada linha (ordenada por total decrescente)
+/// ao filho com o menor total acumulado. Minimiza a diferença máxima entre
+/// contas. Devolve as `SplitAssignment` prontas para serem passadas a
+/// `split_document`. Não muta a BD: a UI pode mostrar a sugestão e deixar o
+/// utilizador ajustar antes de confirmar.
+pub fn plan_auto_split(lines: &[DocumentDetail], num_accounts: usize) -> Vec<SplitAssignment> {
+    assert!(num_accounts > 0, "num_accounts must be positive");
+    let mut buckets: Vec<(i64, Vec<Uuid>)> = (0..num_accounts).map(|_| (0, Vec::new())).collect();
+    let mut sorted: Vec<&DocumentDetail> = lines
+        .iter()
+        .filter(|l| l.pedida_em.is_some() && !l.anulada)
+        .collect();
+    sorted.sort_by(|a, b| b.total.cmp(&a.total));
+    for line in sorted {
+        let (idx, _) = buckets
+            .iter()
+            .enumerate()
+            .min_by_key(|(i, (total, _))| (*total, *i))
+            .expect("at least one bucket");
+        buckets[idx].0 += line.total;
+        buckets[idx].1.push(line.id);
+    }
+    buckets
+        .into_iter()
+        .map(|(_, line_ids)| SplitAssignment { line_ids })
+        .collect()
 }
 
 /// Locks the series row, allocates the next sequential number, fetches the

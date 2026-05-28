@@ -329,6 +329,59 @@ function App() {
     }
   };
 
+  // Pagamento parcial: move as linhas seleccionadas para um filho e fecha
+  // fiscalmente esse filho. Pai mantém-se aberto com o resto das linhas; o
+  // recibo impresso é o do filho (apenas linhas pagas).
+  const partialCloseAndPrint = async (
+    lineIds: string[],
+    payments: PaymentLineInput[]
+  ) => {
+    const d = doc();
+    if (!d || lineIds.length === 0 || payments.length === 0) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const child = await api.partialCloseDocument(d.document.id, {
+        line_ids: lineIds,
+        payments,
+      });
+      const printed = await api.printDocument(child.document.id);
+      // Recarrega o pai (linhas movidas / total actualizado).
+      const parent = await api.document(d.document.id);
+      setDoc(parent);
+      setReceipt(printed);
+      await refetchTables();
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Divisão de conta: cria N filhos com as linhas distribuídas conforme as
+  // `assignments`. Pai fica fechado (sem fiscal) quando ficar vazio. Após
+  // dividir, o utilizador volta à vista de mesas (os filhos serão fechados
+  // individualmente pela coluna de pedido — fora deste fluxo nesta iteração).
+  const splitDocument = async (
+    assignments: Array<{ line_ids: string[] }>
+  ) => {
+    const d = doc();
+    if (!d || assignments.length === 0) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await api.splitDocument(d.document.id, assignments);
+      // O pai pode ter ficado split-closed; reavalia o estado.
+      const parent = await api.document(d.document.id);
+      setDoc(parent);
+      await refetchTables();
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div class="flex h-full w-full bg-zinc-900 text-white select-none">
       <Sidebar
@@ -420,6 +473,8 @@ function App() {
               }}
               onClose={closeAndPrint}
               onCloseMulti={closeMultiAndPrint}
+              onPartialClose={partialCloseAndPrint}
+              onSplit={splitDocument}
             />
             <CatalogPane
               families={families()}
@@ -911,10 +966,14 @@ function OrderColumn(props: {
   onTransfer: () => void;
   onClose: (paymentMethodId: string | null) => void;
   onCloseMulti: (payments: PaymentLineInput[]) => void;
+  onPartialClose: (lineIds: string[], payments: PaymentLineInput[]) => void;
+  onSplit: (assignments: Array<{ line_ids: string[] }>) => void;
 }) {
   const [selectedMethod, setSelectedMethod] = createSignal<string | "">("");
   const [receivedCents, setReceivedCents] = createSignal<number>(0);
   const [showAdvanced, setShowAdvanced] = createSignal(false);
+  const [showPartial, setShowPartial] = createSignal(false);
+  const [showSplit, setShowSplit] = createSignal(false);
   const total = () => props.doc?.document.total ?? 0;
   const change = () => Math.max(0, receivedCents() - total());
   const remaining = () => Math.max(0, total() - receivedCents());
@@ -1151,18 +1210,48 @@ function OrderColumn(props: {
               : "FECHAR & IMPRIMIR"}
         </button>
 
-        <button
-          onClick={() => setShowAdvanced(true)}
-          disabled={
-            !props.doc ||
-            props.doc.document.is_closed ||
-            props.doc.lines.length === 0 ||
-            props.busy
-          }
-          class="w-full mt-2 py-2 rounded-lg font-semibold text-sm bg-zinc-700 hover:bg-zinc-600 text-zinc-100 disabled:opacity-50 disabled:pointer-events-none"
-        >
-          Avançado (múltiplos métodos)
-        </button>
+        <div class="grid grid-cols-3 gap-2 mt-2">
+          <button
+            onClick={() => setShowAdvanced(true)}
+            disabled={
+              !props.doc ||
+              props.doc.document.is_closed ||
+              props.doc.lines.length === 0 ||
+              props.busy
+            }
+            class="py-2 rounded-lg font-semibold text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-100 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            Múltiplos métodos
+          </button>
+          <button
+            onClick={() => setShowPartial(true)}
+            disabled={
+              !props.doc ||
+              props.doc.document.is_closed ||
+              (props.doc.lines ?? []).filter(
+                (l) => l.pedida_em !== null && !l.anulada
+              ).length === 0 ||
+              props.busy
+            }
+            class="py-2 rounded-lg font-semibold text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-100 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            Pagamento parcial
+          </button>
+          <button
+            onClick={() => setShowSplit(true)}
+            disabled={
+              !props.doc ||
+              props.doc.document.is_closed ||
+              (props.doc.lines ?? []).filter(
+                (l) => l.pedida_em !== null && !l.anulada
+              ).length < 2 ||
+              props.busy
+            }
+            class="py-2 rounded-lg font-semibold text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-100 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            Dividir conta
+          </button>
+        </div>
       </div>
 
       <Show when={showAdvanced() && props.doc && !props.doc.document.is_closed}>
@@ -1174,6 +1263,38 @@ function OrderColumn(props: {
           onConfirm={(payments) => {
             setShowAdvanced(false);
             props.onCloseMulti(payments);
+          }}
+        />
+      </Show>
+
+      <Show when={showPartial() && props.doc && !props.doc.document.is_closed}>
+        <PartialPaymentModal
+          lines={(props.doc?.lines ?? []).filter(
+            (l) => l.pedida_em !== null && !l.anulada
+          )}
+          articleById={props.articleById}
+          paymentMethods={props.paymentMethods}
+          busy={props.busy}
+          onCancel={() => setShowPartial(false)}
+          onConfirm={(lineIds, payments) => {
+            setShowPartial(false);
+            props.onPartialClose(lineIds, payments);
+          }}
+        />
+      </Show>
+
+      <Show when={showSplit() && props.doc && !props.doc.document.is_closed}>
+        <SplitDocumentModal
+          documentId={props.doc!.document.id}
+          lines={(props.doc?.lines ?? []).filter(
+            (l) => l.pedida_em !== null && !l.anulada
+          )}
+          articleById={props.articleById}
+          busy={props.busy}
+          onCancel={() => setShowSplit(false)}
+          onConfirm={(assignments) => {
+            setShowSplit(false);
+            props.onSplit(assignments);
           }}
         />
       </Show>
@@ -1419,6 +1540,346 @@ function AdvancedPaymentModal(props: {
             class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-sm font-bold disabled:opacity-50 disabled:pointer-events-none"
           >
             Fechar & Imprimir
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Pagamento Parcial: o operador selecciona N linhas pedidas (não anuladas),
+// escolhe um método de pagamento mono-método (mantém o fluxo simples para o
+// caso comum — pagar uma rodada para um cliente), e o servidor cria um filho
+// com essas linhas e fecha-o fiscalmente. O pai mantém-se aberto.
+function PartialPaymentModal(props: {
+  lines: DocumentDetail[];
+  articleById: (id: string) => Article | undefined;
+  paymentMethods: PaymentMethod[];
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (lineIds: string[], payments: PaymentLineInput[]) => void;
+}) {
+  const [selected, setSelected] = createSignal<Set<string>>(new Set());
+  const [methodId, setMethodId] = createSignal<string>("");
+
+  const toggle = (id: string) =>
+    setSelected((curr) => {
+      const next = new Set(curr);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const selectedTotal = () =>
+    props.lines
+      .filter((l) => selected().has(l.id))
+      .reduce((s, l) => s + l.total, 0);
+
+  const canConfirm = () => selected().size > 0 && methodId() !== "";
+
+  const submit = () => {
+    const ids = props.lines.filter((l) => selected().has(l.id)).map((l) => l.id);
+    props.onConfirm(ids, [
+      { payment_method_id: methodId(), amount: selectedTotal() },
+    ]);
+  };
+
+  return (
+    <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div class="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl w-full max-w-xl flex flex-col max-h-[90vh]">
+        <div class="px-5 py-4 border-b border-zinc-800 flex justify-between items-center">
+          <h2 class="text-xl font-bold text-white">Pagamento Parcial</h2>
+          <button
+            onClick={props.onCancel}
+            class="text-zinc-400 hover:text-white text-2xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-5 space-y-4">
+          <div class="text-sm text-zinc-300">
+            Selecciona as linhas a pagar. Vai ser gerada uma factura
+            independente para essas linhas. A mesa mantém-se aberta com o
+            resto do pedido.
+          </div>
+
+          <div class="space-y-1">
+            <For each={props.lines}>
+              {(line) => {
+                const checked = () => selected().has(line.id);
+                return (
+                  <label
+                    class={`flex items-center justify-between gap-3 px-3 py-2 rounded-md border cursor-pointer ${
+                      checked()
+                        ? "bg-blue-900/30 border-blue-700"
+                        : "bg-zinc-800 border-zinc-700"
+                    }`}
+                  >
+                    <div class="flex items-center gap-3 min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={checked()}
+                        onChange={() => toggle(line.id)}
+                        class="w-5 h-5"
+                      />
+                      <span class="text-sm font-bold text-blue-400 w-6">
+                        {line.qty}x
+                      </span>
+                      <span class="text-sm text-zinc-100 truncate">
+                        {props.articleById(line.article_id)?.name ?? "Artigo"}
+                      </span>
+                    </div>
+                    <span class="text-sm font-mono text-zinc-200">
+                      {fmtMoney(line.total)}
+                    </span>
+                  </label>
+                );
+              }}
+            </For>
+          </div>
+
+          <div class="bg-zinc-800 rounded-lg p-3 flex justify-between items-center">
+            <span class="text-zinc-400 text-sm">Total seleccionado</span>
+            <span class="text-white font-mono text-lg">
+              {fmtMoney(selectedTotal())}
+            </span>
+          </div>
+
+          <div>
+            <div class="text-xs uppercase text-zinc-400 mb-1">
+              Método de pagamento
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <For each={props.paymentMethods}>
+                {(pm) => (
+                  <button
+                    onClick={() => setMethodId(pm.id)}
+                    class={`px-3 py-2 rounded-lg text-sm font-semibold ${
+                      methodId() === pm.id
+                        ? "bg-blue-600 text-white"
+                        : "bg-zinc-700 hover:bg-zinc-600 text-zinc-100"
+                    }`}
+                  >
+                    {pm.name}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+        </div>
+
+        <div class="px-5 py-4 border-t border-zinc-800 flex gap-2 justify-end">
+          <button
+            onClick={props.onCancel}
+            class="px-4 py-2 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-100 text-sm font-semibold"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={submit}
+            disabled={!canConfirm() || props.busy}
+            class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-sm font-bold disabled:opacity-50 disabled:pointer-events-none"
+          >
+            Cobrar parcial & imprimir
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Divisão de Conta: o operador escolhe N contas, atribui cada linha pedida a
+// uma conta (manualmente, ou via botão "Distribuição Automática" que pede ao
+// servidor um plano greedy/LPT). Ao confirmar, o servidor cria N filhos com
+// as linhas distribuídas; o pai fica fechado (sem fiscal) se ficar vazio. Os
+// filhos serão fechados individualmente depois.
+function SplitDocumentModal(props: {
+  documentId: string;
+  lines: DocumentDetail[];
+  articleById: (id: string) => Article | undefined;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (assignments: Array<{ line_ids: string[] }>) => void;
+}) {
+  const [numAccounts, setNumAccounts] = createSignal<number>(2);
+  // Mapa lineId -> accountIndex (0-based). Inicialmente tudo na conta 0.
+  const [assignment, setAssignment] = createSignal<Record<string, number>>(
+    Object.fromEntries(props.lines.map((l) => [l.id, 0]))
+  );
+
+  const accountIdxs = () =>
+    Array.from({ length: numAccounts() }, (_, i) => i);
+
+  const accountTotal = (idx: number) =>
+    props.lines
+      .filter((l) => assignment()[l.id] === idx)
+      .reduce((s, l) => s + l.total, 0);
+
+  const cycle = (lineId: string) => {
+    setAssignment((curr) => {
+      const cur = curr[lineId] ?? 0;
+      return { ...curr, [lineId]: (cur + 1) % numAccounts() };
+    });
+  };
+
+  // Ao mudar N, normaliza atribuições fora de range para a conta 0.
+  const setN = (n: number) => {
+    setNumAccounts(Math.max(2, Math.min(10, n)));
+    setAssignment((curr) => {
+      const max = numAccounts();
+      const next: Record<string, number> = {};
+      for (const [k, v] of Object.entries(curr)) {
+        next[k] = v < max ? v : 0;
+      }
+      return next;
+    });
+  };
+
+  const autoDistribute = async () => {
+    try {
+      const plan = await api.autoSplitPlan(props.documentId, numAccounts());
+      const next: Record<string, number> = {};
+      plan.assignments.forEach((acc, idx) => {
+        for (const lineId of acc.line_ids) next[lineId] = idx;
+      });
+      // Linhas sem atribuição no plano ficam na conta 0.
+      for (const l of props.lines) if (!(l.id in next)) next[l.id] = 0;
+      setAssignment(next);
+    } catch {
+      /* mantém estado actual */
+    }
+  };
+
+  const canConfirm = () =>
+    // Cada conta deve ter pelo menos uma linha (senão filho com total 0 não passa
+    // no fecho fiscal). Nesta iteração validamos com aviso visual.
+    accountIdxs().every((idx) => accountTotal(idx) > 0);
+
+  const submit = () => {
+    const assignments: Array<{ line_ids: string[] }> = accountIdxs().map((idx) => ({
+      line_ids: props.lines
+        .filter((l) => assignment()[l.id] === idx)
+        .map((l) => l.id),
+    }));
+    props.onConfirm(assignments);
+  };
+
+  return (
+    <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div class="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col max-h-[90vh]">
+        <div class="px-5 py-4 border-b border-zinc-800 flex justify-between items-center">
+          <h2 class="text-xl font-bold text-white">Dividir Conta</h2>
+          <button
+            onClick={props.onCancel}
+            class="text-zinc-400 hover:text-white text-2xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-5 space-y-4">
+          <div class="flex items-center gap-3">
+            <span class="text-zinc-300 text-sm">Nº contas</span>
+            <button
+              onClick={() => setN(numAccounts() - 1)}
+              disabled={numAccounts() <= 2}
+              class="w-10 h-10 rounded-md bg-zinc-700 text-white font-bold text-lg disabled:opacity-40"
+            >
+              −
+            </button>
+            <span class="text-white font-mono w-8 text-center text-xl">
+              {numAccounts()}
+            </span>
+            <button
+              onClick={() => setN(numAccounts() + 1)}
+              disabled={numAccounts() >= 10}
+              class="w-10 h-10 rounded-md bg-zinc-700 text-white font-bold text-lg disabled:opacity-40"
+            >
+              +
+            </button>
+            <button
+              onClick={autoDistribute}
+              disabled={props.busy}
+              class="ml-auto px-3 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-semibold"
+            >
+              Distribuição Automática
+            </button>
+          </div>
+
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+            <For each={accountIdxs()}>
+              {(idx) => (
+                <div
+                  class={`rounded-lg p-2 border ${
+                    accountTotal(idx) > 0
+                      ? "border-emerald-700 bg-emerald-900/20"
+                      : "border-amber-700 bg-amber-900/20"
+                  }`}
+                >
+                  <div class="text-xs uppercase text-zinc-300">
+                    Conta {idx + 1}
+                  </div>
+                  <div class="text-white font-mono text-lg">
+                    {fmtMoney(accountTotal(idx))}
+                  </div>
+                </div>
+              )}
+            </For>
+          </div>
+
+          <div class="text-xs text-zinc-400">
+            Toca numa linha para passá-la à próxima conta (1 → 2 → … → N → 1).
+          </div>
+
+          <div class="space-y-1">
+            <For each={props.lines}>
+              {(line) => {
+                const idx = () => assignment()[line.id] ?? 0;
+                return (
+                  <button
+                    onClick={() => cycle(line.id)}
+                    class="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700"
+                  >
+                    <div class="flex items-center gap-3 min-w-0">
+                      <span class="text-xs uppercase font-bold text-indigo-300 w-16 text-left">
+                        Conta {idx() + 1}
+                      </span>
+                      <span class="text-sm font-bold text-blue-400 w-6">
+                        {line.qty}x
+                      </span>
+                      <span class="text-sm text-zinc-100 truncate">
+                        {props.articleById(line.article_id)?.name ?? "Artigo"}
+                      </span>
+                    </div>
+                    <span class="text-sm font-mono text-zinc-200">
+                      {fmtMoney(line.total)}
+                    </span>
+                  </button>
+                );
+              }}
+            </For>
+          </div>
+        </div>
+
+        <div class="px-5 py-4 border-t border-zinc-800 flex gap-2 justify-end items-center">
+          <Show when={!canConfirm()}>
+            <span class="text-xs text-amber-300 mr-auto">
+              Cada conta tem de ter pelo menos uma linha.
+            </span>
+          </Show>
+          <button
+            onClick={props.onCancel}
+            class="px-4 py-2 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-100 text-sm font-semibold"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={submit}
+            disabled={!canConfirm() || props.busy}
+            class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-sm font-bold disabled:opacity-50 disabled:pointer-events-none"
+          >
+            Confirmar Divisão
           </button>
         </div>
       </div>

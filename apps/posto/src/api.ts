@@ -538,6 +538,46 @@ export const api = {
       body: JSON.stringify({ payments }),
     }),
 
+  /**
+   * Pagamento parcial: move as `line_ids` para um documento-filho e fecha
+   * fiscalmente esse filho. O pai mantém-se aberto com o resto das linhas
+   * (mesa segue ocupada). Retorna o `DocumentResponse` do filho fechado.
+   */
+  partialCloseDocument: (
+    documentId: string,
+    body: { line_ids: string[]; payments?: PaymentLineInput[]; payment_method_id?: string | null }
+  ) =>
+    jsonReq<DocumentResponse>(`/api/documents/${documentId}/partial-close`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * Sugestão de divisão automática (greedy LPT). Não muta a BD — devolve
+   * a distribuição planeada de linhas por conta-filho.
+   */
+  autoSplitPlan: (documentId: string, numAccounts: number) =>
+    jsonReq<{
+      assignments: Array<{ line_ids: string[]; total: number }>;
+    }>(`/api/documents/${documentId}/split/auto-plan?num_accounts=${numAccounts}`),
+
+  /**
+   * Divide um documento em N filhos. `assignments.length` = N. Cada filho
+   * fica aberto pronto a ser fechado individualmente. Retorna todos os
+   * filhos criados.
+   */
+  splitDocument: (
+    documentId: string,
+    assignments: Array<{ line_ids: string[] }>
+  ) =>
+    jsonReq<{ children: DocumentResponse[] }>(
+      `/api/documents/${documentId}/split`,
+      {
+        method: "POST",
+        body: JSON.stringify({ assignments }),
+      }
+    ),
+
   printDocument: async (documentId: string): Promise<string> => {
     const res = await fetch(`${BASE}/api/documents/${documentId}/print`, {
       method: "POST",

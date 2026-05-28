@@ -135,6 +135,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/transferencias", get(get_transferencias))
         .route("/api/documents/:id/transfer", post(transfer_document))
         .route("/api/documents/:id/close", post(close_document))
+        .route("/api/documents/:id/partial-close", post(partial_close_document))
+        .route("/api/documents/:id/split", post(split_document_handler))
+        .route("/api/documents/:id/split/auto-plan", get(auto_split_plan))
         .route("/api/documents/:id/print", post(print_document))
         .with_state(state)
         .layer(cors)
@@ -882,43 +885,61 @@ async fn close_document(
     let pool = state.db.pool();
     let req = body.map(|b| b.0).unwrap_or_default();
     let document = storage::get_document(pool, id).await?;
-    if document.is_closed {
-        return Err(ApiError::BadRequest("document already closed".into()));
-    }
-    if document.total <= 0 {
-        return Err(ApiError::BadRequest("document has no lines".into()));
-    }
+    let payment_inputs = build_payment_inputs(&req, document.total)?;
+    let document = fiscal_close_document(&state, id, &payment_inputs).await?;
+    Ok(Json(build_doc_response(pool, document).await?))
+}
 
-    // Normaliza pagamentos: lista explícita ganha sempre; senão usa o atalho
-    // mono-método (regista o total do documento como um único rodapé).
-    let payment_inputs: Vec<storage::PaymentInput> = if !req.payments.is_empty() {
-        req.payments
+/// Converte o body do request para uma lista de `PaymentInput` consumível
+/// pelo storage. O atalho mono-método é expandido para um único rodapé pelo
+/// `document_total`. Validações: amount > 0 em modo multi-método.
+fn build_payment_inputs(
+    req: &CloseDocumentRequest,
+    document_total: i64,
+) -> ApiResult<Vec<storage::PaymentInput>> {
+    if !req.payments.is_empty() {
+        for p in &req.payments {
+            if p.amount <= 0 {
+                return Err(ApiError::BadRequest(
+                    "payment amount must be positive".into(),
+                ));
+            }
+        }
+        Ok(req
+            .payments
             .iter()
             .map(|p| storage::PaymentInput {
                 payment_method_id: p.payment_method_id,
                 amount: p.amount,
                 descricao: p.descricao.clone(),
             })
-            .collect()
+            .collect())
     } else if let Some(method_id) = req.payment_method_id {
-        vec![storage::PaymentInput {
+        Ok(vec![storage::PaymentInput {
             payment_method_id: method_id,
-            amount: document.total,
+            amount: document_total,
             descricao: None,
-        }]
+        }])
     } else {
-        Vec::new()
-    };
+        Ok(Vec::new())
+    }
+}
 
-    // Cada `amount` é em cêntimos e deve ser positivo. O preço da linha já reflecte
-    // o tipo_preco do local (e.g. PVP5 para consumo próprio com items grátis ou
-    // reduzidos); o somatório dos pagamentos cobre o total já apurado.
-    for p in &payment_inputs {
-        if p.amount <= 0 {
-            return Err(ApiError::BadRequest(
-                "payment amount must be positive".into(),
-            ));
-        }
+/// Núcleo do fecho fiscal: aloca série, calcula hash/ATCUD/QR, grava rodapés
+/// e marca o documento fechado. Partilhado entre `close_document` e
+/// `partial_close_document`.
+async fn fiscal_close_document(
+    state: &Arc<AppState>,
+    document_id: Uuid,
+    payment_inputs: &[storage::PaymentInput],
+) -> ApiResult<Document> {
+    let pool = state.db.pool();
+    let document = storage::get_document(pool, document_id).await?;
+    if document.is_closed {
+        return Err(ApiError::BadRequest("document already closed".into()));
+    }
+    if document.total <= 0 {
+        return Err(ApiError::BadRequest("document has no lines".into()));
     }
     let payments_sum: i64 = payment_inputs.iter().map(|p| p.amount).sum();
     if !payment_inputs.is_empty() && payments_sum < document.total {
@@ -928,7 +949,6 @@ async fn close_document(
         )));
     }
 
-    // Fiscal close: allocate series number, sign, build ATCUD + QR.
     let lines = storage::list_document_details(pool, document.id).await?;
     let mut articles = Vec::with_capacity(lines.len());
     for l in &lines {
@@ -991,10 +1011,8 @@ async fn close_document(
     )
     .await?;
 
-    // Regista rodapés de pagamento e troco na mesma transacção fiscal: garante
-    // que o fecho é tudo-ou-nada (não há documentos "fechados" sem rodapé).
     if !payment_inputs.is_empty() {
-        storage::record_payments_bulk_tx(&mut tx, document.id, document.total, &payment_inputs)
+        storage::record_payments_bulk_tx(&mut tx, document.id, document.total, payment_inputs)
             .await?;
     }
 
@@ -1004,7 +1022,143 @@ async fn close_document(
     let _ = state
         .event_bus
         .publish(SystemEvent::DocumentClosed { document_id: document.id });
-    Ok(Json(build_doc_response(pool, document).await?))
+    Ok(document)
+}
+
+#[derive(Deserialize)]
+pub struct PartialCloseRequest {
+    /// Linhas do pai a transferir para o filho. Têm de estar pedidas e não
+    /// anuladas. O cliente envia exactamente as linhas seleccionadas no UI.
+    pub line_ids: Vec<Uuid>,
+    /// Rodapés de pagamento do filho (1..N métodos) — mesma estrutura do
+    /// endpoint principal de fecho.
+    #[serde(default)]
+    pub payments: Vec<PaymentLineRequest>,
+    /// Atalho mono-método. Ignorado se `payments` vier preenchido.
+    pub payment_method_id: Option<Uuid>,
+}
+
+/// Pagamento parcial: move linhas do pai para um filho recém-criado e fecha
+/// o filho fiscalmente. O pai mantém-se aberto com as linhas remanescentes
+/// (mesa segue ocupada). Resposta: o `DocumentResponse` do filho fechado.
+async fn partial_close_document(
+    State(state): State<Arc<AppState>>,
+    Path(parent_id): Path<Uuid>,
+    Json(req): Json<PartialCloseRequest>,
+) -> ApiResult<Json<DocumentResponse>> {
+    if req.line_ids.is_empty() {
+        return Err(ApiError::BadRequest(
+            "partial close requires at least one line".into(),
+        ));
+    }
+    let pool = state.db.pool();
+
+    let child = storage::move_lines_to_new_document(pool, parent_id, &req.line_ids)
+        .await
+        .map_err(ApiError::from)?;
+
+    let close_req = CloseDocumentRequest {
+        payment_method_id: req.payment_method_id,
+        payments: req.payments,
+    };
+    let payment_inputs = build_payment_inputs(&close_req, child.total)?;
+    let closed_child = fiscal_close_document(&state, child.id, &payment_inputs).await?;
+    Ok(Json(build_doc_response(pool, closed_child).await?))
+}
+
+#[derive(Deserialize)]
+pub struct SplitRequest {
+    /// Atribuição explícita de linhas a cada filho. Comprimento define N.
+    pub assignments: Vec<SplitAssignmentRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct SplitAssignmentRequest {
+    pub line_ids: Vec<Uuid>,
+}
+
+#[derive(Serialize)]
+pub struct SplitResponse {
+    pub children: Vec<DocumentResponse>,
+}
+
+/// Divide um documento em N filhos. O caller decide a atribuição (manual ou
+/// gerada via `auto-plan`). Cada filho fica aberto, pronto a ser fechado
+/// individualmente pelo endpoint `close`. O pai fica `is_closed=true` (sem
+/// dados fiscais) quando ficar sem linhas elegíveis; a mesa é libertada
+/// nesse momento.
+async fn split_document_handler(
+    State(state): State<Arc<AppState>>,
+    Path(parent_id): Path<Uuid>,
+    Json(req): Json<SplitRequest>,
+) -> ApiResult<Json<SplitResponse>> {
+    if req.assignments.is_empty() {
+        return Err(ApiError::BadRequest(
+            "split requires at least one account".into(),
+        ));
+    }
+    let assignments: Vec<storage::SplitAssignment> = req
+        .assignments
+        .into_iter()
+        .map(|a| storage::SplitAssignment { line_ids: a.line_ids })
+        .collect();
+    let pool = state.db.pool();
+    let children = storage::split_document(pool, parent_id, &assignments)
+        .await
+        .map_err(ApiError::from)?;
+    let mut out = Vec::with_capacity(children.len());
+    for c in children {
+        out.push(build_doc_response(pool, c).await?);
+    }
+    let _ = state
+        .event_bus
+        .publish(SystemEvent::DocumentClosed { document_id: parent_id });
+    Ok(Json(SplitResponse { children: out }))
+}
+
+#[derive(Deserialize)]
+pub struct AutoPlanQuery {
+    pub num_accounts: usize,
+}
+
+#[derive(Serialize)]
+pub struct AutoPlanResponse {
+    pub assignments: Vec<AutoPlanAccount>,
+}
+
+#[derive(Serialize)]
+pub struct AutoPlanAccount {
+    pub line_ids: Vec<Uuid>,
+    pub total: i64,
+}
+
+/// Sugestão de divisão automática (greedy LPT) que a UI pode mostrar antes
+/// do utilizador confirmar. Não muta a BD. A UI pode aplicar tal-e-qual ou
+/// permitir ajustes manuais antes de chamar `POST split`.
+async fn auto_split_plan(
+    State(state): State<Arc<AppState>>,
+    Path(parent_id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<AutoPlanQuery>,
+) -> ApiResult<Json<AutoPlanResponse>> {
+    if q.num_accounts == 0 {
+        return Err(ApiError::BadRequest("num_accounts must be > 0".into()));
+    }
+    let pool = state.db.pool();
+    let lines = storage::list_document_details(pool, parent_id).await?;
+    let plan = storage::plan_auto_split(&lines, q.num_accounts);
+    let mut accounts = Vec::with_capacity(plan.len());
+    for assignment in plan {
+        let total: i64 = lines
+            .iter()
+            .filter(|l| assignment.line_ids.contains(&l.id))
+            .map(|l| l.total)
+            .sum();
+        accounts.push(AutoPlanAccount {
+            line_ids: assignment.line_ids,
+            total,
+        });
+    }
+    Ok(Json(AutoPlanResponse { assignments: accounts }))
 }
 
 struct VatBucket {
