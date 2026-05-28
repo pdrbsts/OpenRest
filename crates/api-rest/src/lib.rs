@@ -13,8 +13,10 @@ use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 use domain::{
-    Article, Atcud, Document, DocumentDetail, DocumentSeries, Employee, Family, Local, MesaEstado,
-    Payment, PaymentMethod, Table,
+    Anulacao, Article, Atcud, Cancelamento, Customer, DeliveryEstado, Dispositivo, Document,
+    DocumentDetail, DocumentSeries, Employee, Entregador, Family, ImpressoraZonaLocal, Local,
+    MesaEstado, Payment, PaymentMethod, PedidoDelivery, SessaoEmpregado, Table, TipoPreco,
+    Transferencia, Zona, ZonaImpressao,
 };
 
 mod error;
@@ -63,6 +65,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/system/current-day", get(get_current_day))
         .route("/api/catalog", get(get_catalog))
         .route("/api/locais", get(get_locais).post(create_local))
         .route(
@@ -78,11 +81,59 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/tables/:id/open", post(open_table))
         .route("/api/tables/:id/document", get(get_table_document))
         .route("/api/employees", get(get_employees))
+        .route("/api/sessoes", get(list_sessoes_handler).post(open_sessao_handler))
+        .route("/api/sessoes/:id/fechar", post(close_sessao_handler))
+        .route(
+            "/api/employees/:id/sessao-aberta",
+            get(get_open_sessao_handler),
+        )
         .route("/api/payment-methods", get(get_payment_methods))
         .route("/api/series", get(get_series))
         .route("/api/atcuds", get(get_atcuds))
+        .route("/api/customers", get(get_customers).post(create_customer))
+        .route("/api/customers/search", get(search_customers))
+        .route("/api/customers/:id", get(get_customer).put(update_customer))
+        .route("/api/customers/:id/forget", post(forget_customer))
+        .route(
+            "/api/locais/:id/start-document",
+            post(start_local_document),
+        )
+        .route("/api/locais/:id/consumo", post(open_consumo_proprio))
+        .route("/api/documents/:id/context", post(set_document_context))
+        .route("/api/deliveries", get(get_active_deliveries))
+        .route("/api/deliveries/:id/state", post(update_delivery_state))
+        .route("/api/tipos-preco", get(get_tipos_preco))
+        .route("/api/zonas", get(get_zonas).post(create_zona))
+        .route("/api/zonas/:id", put(update_zona).delete(delete_zona))
+        .route("/api/entregadores", get(get_entregadores).post(create_entregador))
+        .route("/api/entregadores/:id", put(update_entregador).delete(delete_entregador))
+        .route("/api/zonas-impressao", get(get_zonas_impressao).post(create_zona_impressao))
+        .route(
+            "/api/zonas-impressao/:id",
+            put(update_zona_impressao).delete(delete_zona_impressao),
+        )
+        .route("/api/dispositivos", get(get_dispositivos).post(create_dispositivo))
+        .route(
+            "/api/dispositivos/:id",
+            put(update_dispositivo).delete(delete_dispositivo),
+        )
+        .route("/api/print-mappings", get(get_print_mappings).post(create_print_mapping))
+        .route("/api/print-mappings/:id", axum::routing::delete(delete_print_mapping))
+        .route("/api/documents/:id/pedir", post(pedir_document))
         .route("/api/documents/:id", get(get_document))
         .route("/api/documents/:id/lines", post(add_line))
+        .route(
+            "/api/documents/:id/lines/:line_id",
+            axum::routing::delete(cancel_line),
+        )
+        .route(
+            "/api/documents/:id/lines/:line_id/anular",
+            post(anular_line),
+        )
+        .route("/api/anulacoes", get(get_anulacoes))
+        .route("/api/cancelamentos", get(get_cancelamentos))
+        .route("/api/transferencias", get(get_transferencias))
+        .route("/api/documents/:id/transfer", post(transfer_document))
         .route("/api/documents/:id/close", post(close_document))
         .route("/api/documents/:id/print", post(print_document))
         .with_state(state)
@@ -91,6 +142,24 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+#[derive(Serialize)]
+pub struct CurrentDayResponse {
+    pub data_dia: chrono::NaiveDate,
+    pub server_now: chrono::DateTime<Utc>,
+    pub cutoff_minutes: u32,
+    pub tz_offset_minutes: i32,
+}
+
+async fn get_current_day(State(state): State<Arc<AppState>>) -> Json<CurrentDayResponse> {
+    let now = Utc::now();
+    Json(CurrentDayResponse {
+        data_dia: state.config.business_day(now),
+        server_now: now,
+        cutoff_minutes: state.config.business_day_cutoff_minutes,
+        tz_offset_minutes: state.config.business_day_tz_offset_minutes,
+    })
 }
 
 #[derive(Serialize)]
@@ -379,6 +448,96 @@ async fn get_employees(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec
     Ok(Json(storage::list_employees(state.db.pool()).await?))
 }
 
+// --- Sessões de empregado --------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ListSessoesQuery {
+    #[serde(default)]
+    pub apenas_abertas: bool,
+}
+
+async fn list_sessoes_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<ListSessoesQuery>,
+) -> ApiResult<Json<Vec<SessaoEmpregado>>> {
+    Ok(Json(
+        storage::list_sessoes(state.db.pool(), q.apenas_abertas).await?,
+    ))
+}
+
+async fn get_open_sessao_handler(
+    State(state): State<Arc<AppState>>,
+    Path(employee_id): Path<Uuid>,
+) -> ApiResult<Json<Option<SessaoEmpregado>>> {
+    Ok(Json(
+        storage::get_open_sessao_for_employee(state.db.pool(), employee_id).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct OpenSessaoRequest {
+    pub empregado_id: Uuid,
+    #[serde(default)]
+    pub com_bolsa: bool,
+    #[serde(default)]
+    pub fundo_bolsa: i64,
+    pub observacao: Option<String>,
+    /// Empregado que está a abrir (e.g. supervisor). Default: o próprio.
+    pub aberta_por: Option<Uuid>,
+}
+
+async fn open_sessao_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OpenSessaoRequest>,
+) -> ApiResult<(StatusCode, Json<SessaoEmpregado>)> {
+    let pool = state.db.pool();
+    // Garante que o empregado existe (evita FK pendurada).
+    storage::get_employee(pool, req.empregado_id).await?;
+    let data_dia = state.config.business_day(Utc::now());
+    let sessao = storage::open_sessao(
+        pool,
+        storage::NewSessao {
+            empregado_id: req.empregado_id,
+            data_dia,
+            com_bolsa: req.com_bolsa,
+            fundo_bolsa: req.fundo_bolsa,
+            observacao_abertura: req.observacao,
+            aberta_por: req.aberta_por.or(Some(req.empregado_id)),
+        },
+    )
+    .await
+    .map_err(|e| match &e {
+        storage::StorageError::Database(storage::sqlx::Error::Protocol(msg)) => {
+            ApiError::BadRequest(msg.clone())
+        }
+        _ => ApiError::from(e),
+    })?;
+    Ok((StatusCode::CREATED, Json(sessao)))
+}
+
+#[derive(Deserialize, Default)]
+pub struct CloseSessaoRequest {
+    pub observacao: Option<String>,
+    pub fechada_por: Option<Uuid>,
+}
+
+async fn close_sessao_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<CloseSessaoRequest>>,
+) -> ApiResult<Json<SessaoEmpregado>> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let sessao = storage::close_sessao(state.db.pool(), id, req.observacao, req.fechada_por)
+        .await
+        .map_err(|e| match &e {
+            storage::StorageError::Database(storage::sqlx::Error::Protocol(msg)) => {
+                ApiError::BadRequest(msg.clone())
+            }
+            _ => ApiError::from(e),
+        })?;
+    Ok(Json(sessao))
+}
+
 async fn get_payment_methods(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<Vec<PaymentMethod>>> {
@@ -404,7 +563,9 @@ async fn open_table(
     body: Option<Json<OpenTableRequest>>,
 ) -> ApiResult<Json<DocumentResponse>> {
     let employee_id = body.and_then(|b| b.employee_id);
-    let document = storage::open_table(state.db.pool(), id, employee_id).await?;
+    let business_date = state.config.business_day(Utc::now());
+    let document =
+        storage::open_table(state.db.pool(), id, employee_id, business_date).await?;
     let _ = state
         .event_bus
         .publish(SystemEvent::DocumentCreated { document_id: document.id });
@@ -451,7 +612,14 @@ async fn add_line(
         return Err(ApiError::BadRequest("document is closed".into()));
     }
     let article = storage::get_article(pool, req.article_id).await?;
-    storage::add_document_line(pool, document_id, article.id, req.qty, article.price).await?;
+    // Preço escolhido pelo tipo_preco do local
+    let unit_price = if let Some(local_id) = document.local_id {
+        let local = storage::get_local(pool, local_id).await?;
+        storage::price_for_local(pool, &article, &local).await?
+    } else {
+        article.pvp1
+    };
+    storage::add_document_line(pool, document_id, article.id, req.qty, unit_price).await?;
     let document = storage::get_document(pool, document_id).await?;
     let _ = state
         .event_bus
@@ -459,9 +627,251 @@ async fn add_line(
     Ok(Json(build_doc_response(pool, document).await?))
 }
 
+/// Resolve `employee_id` → `NivelAcesso`. Returns 400 if missing, 404 if unknown,
+/// 403 if the employee has no nível atribuído.
+async fn require_nivel(
+    pool: &storage::sqlx::SqlitePool,
+    employee_id: Option<Uuid>,
+) -> ApiResult<domain::NivelAcesso> {
+    let employee_id =
+        employee_id.ok_or_else(|| ApiError::BadRequest("employee_id is required".into()))?;
+    let employee = storage::get_employee(pool, employee_id).await?;
+    let nivel_id = employee
+        .nivel_acesso_id
+        .ok_or_else(|| ApiError::Forbidden("employee has no nivel_acesso".into()))?;
+    Ok(storage::get_nivel_acesso(pool, nivel_id).await?)
+}
+
+#[derive(Deserialize, Default)]
+pub struct CancelLineRequest {
+    pub motivo: Option<String>,
+    pub employee_id: Option<Uuid>,
+}
+
+async fn cancel_line(
+    State(state): State<Arc<AppState>>,
+    Path((document_id, line_id)): Path<(Uuid, Uuid)>,
+    body: Option<Json<CancelLineRequest>>,
+) -> ApiResult<Json<DocumentResponse>> {
+    let pool = state.db.pool();
+    let document = storage::get_document(pool, document_id).await?;
+    if document.is_closed {
+        return Err(ApiError::BadRequest("document already closed".into()));
+    }
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let nivel = require_nivel(pool, req.employee_id).await?;
+    if !nivel.cancela_pedidos {
+        return Err(ApiError::Forbidden(
+            "nível de acesso sem permissão 'pedidos.cancelar'".into(),
+        ));
+    }
+    storage::cancel_document_line(
+        pool,
+        document_id,
+        line_id,
+        state.config.registar_cancelamentos,
+        req.motivo,
+        req.employee_id,
+    )
+    .await
+    .map_err(|e| match &e {
+        storage::StorageError::Database(storage::sqlx::Error::Protocol(msg)) => {
+            ApiError::BadRequest(msg.clone())
+        }
+        _ => ApiError::from(e),
+    })?;
+    let document = storage::get_document(pool, document_id).await?;
+    Ok(Json(build_doc_response(pool, document).await?))
+}
+
+async fn get_anulacoes(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<Anulacao>>> {
+    Ok(Json(storage::list_anulacoes(state.db.pool()).await?))
+}
+
+async fn get_cancelamentos(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Vec<Cancelamento>>> {
+    Ok(Json(storage::list_cancelamentos(state.db.pool()).await?))
+}
+
+async fn get_transferencias(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Vec<Transferencia>>> {
+    Ok(Json(storage::list_transferencias(state.db.pool()).await?))
+}
+
+#[derive(Deserialize)]
+pub struct TransferRequest {
+    pub target_table_id: Uuid,
+    #[serde(default)]
+    pub line_ids: Option<Vec<Uuid>>,
+    pub employee_id: Option<Uuid>,
+}
+
+#[derive(Serialize)]
+pub struct TransferResponse {
+    pub from_document: DocumentResponse,
+    pub to_document: DocumentResponse,
+    pub transferencias: Vec<Transferencia>,
+}
+
+async fn transfer_document(
+    State(state): State<Arc<AppState>>,
+    Path(document_id): Path<Uuid>,
+    Json(req): Json<TransferRequest>,
+) -> ApiResult<Json<TransferResponse>> {
+    let pool = state.db.pool();
+    let from_doc = storage::get_document(pool, document_id).await?;
+    if from_doc.is_closed {
+        return Err(ApiError::BadRequest("document already closed".into()));
+    }
+    let nivel = require_nivel(pool, req.employee_id).await?;
+    if !nivel.transfere_pedidos {
+        return Err(ApiError::Forbidden(
+            "nível de acesso sem permissão 'pedidos.transferencias'".into(),
+        ));
+    }
+    if from_doc.subtotal_impresso_em.is_some() && !nivel.transfere_pedidos_com_conta_impressa {
+        return Err(ApiError::Forbidden(
+            "nível de acesso sem permissão 'pedidos.transferencias.com_conta_impressa'".into(),
+        ));
+    }
+
+    let line_ids_slice = req.line_ids.as_deref();
+    let business_date = state.config.business_day(Utc::now());
+    let (to_doc, transferencias) = storage::transfer_document_lines(
+        pool,
+        document_id,
+        req.target_table_id,
+        line_ids_slice,
+        req.employee_id,
+        business_date,
+    )
+    .await
+    .map_err(|e| match &e {
+        storage::StorageError::Database(storage::sqlx::Error::Protocol(msg)) => {
+            ApiError::BadRequest(msg.clone())
+        }
+        _ => ApiError::from(e),
+    })?;
+
+    let _ = state
+        .event_bus
+        .publish(SystemEvent::DocumentLineAdded { document_id: to_doc.id });
+    let _ = state
+        .event_bus
+        .publish(SystemEvent::DocumentLineAdded { document_id });
+
+    let from_doc = storage::get_document(pool, document_id).await?;
+    Ok(Json(TransferResponse {
+        from_document: build_doc_response(pool, from_doc).await?,
+        to_document: build_doc_response(pool, to_doc).await?,
+        transferencias,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct AnularLineRequest {
+    #[serde(default)]
+    pub com_desperdicio: bool,
+    pub motivo: Option<String>,
+    pub employee_id: Option<Uuid>,
+}
+
+async fn anular_line(
+    State(state): State<Arc<AppState>>,
+    Path((document_id, line_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<AnularLineRequest>,
+) -> ApiResult<Json<DocumentResponse>> {
+    let pool = state.db.pool();
+    let document = storage::get_document(pool, document_id).await?;
+    if document.is_closed {
+        return Err(ApiError::BadRequest("document already closed".into()));
+    }
+    let nivel = require_nivel(pool, req.employee_id).await?;
+    if !nivel.anula_pedidos {
+        return Err(ApiError::Forbidden(
+            "nível de acesso sem permissão 'pedidos.anula'".into(),
+        ));
+    }
+    // Spec §10: se a conta (sub-total) já foi impressa, exige permissão extra.
+    if document.subtotal_impresso_em.is_some() && !nivel.anula_pedidos_com_conta_impressa {
+        return Err(ApiError::Forbidden(
+            "nível de acesso sem permissão 'pedidos.anula.com_conta_impressa'".into(),
+        ));
+    }
+    let line = storage::anular_document_line(
+        pool,
+        document_id,
+        line_id,
+        req.com_desperdicio,
+        req.motivo.clone(),
+        req.employee_id,
+    )
+    .await
+    .map_err(|e| match &e {
+        storage::StorageError::Database(storage::sqlx::Error::Protocol(msg)) => {
+            ApiError::BadRequest(msg.clone())
+        }
+        _ => ApiError::from(e),
+    })?;
+
+    // Imprime ticket de anulação na zona original do artigo (spec §10 "imprime na zona original").
+    let article = storage::get_article(pool, line.article_id).await?;
+    if let (Some(local_id), Some(zona_id)) = (document.local_id, article.zona_impressao_id) {
+        let local = storage::get_local(pool, local_id).await?;
+        if let Some(dispositivo) =
+            storage::dispositivo_for_zona_local(pool, zona_id, local.id).await?
+        {
+            let zona = storage::get_zona_impressao(pool, zona_id).await?;
+            let table_label = match document.table_id {
+                Some(tid) => storage::get_table(pool, tid)
+                    .await
+                    .ok()
+                    .and_then(|t| t.name.or(Some(format!("Mesa {}", t.code))))
+                    .unwrap_or_else(|| "Mesa".into()),
+                None => "Balcão".into(),
+            };
+            let ticket = devices::escpos::format_anulacao_ticket(
+                &zona.designacao,
+                &local.designacao,
+                &table_label,
+                Utc::now(),
+                line.qty,
+                &article.name,
+                req.com_desperdicio,
+                req.motivo.as_deref(),
+            );
+            if let Some(path) = &dispositivo.output_path {
+                let printer = devices::GenericPrinter::new(std::path::PathBuf::from(path));
+                printer
+                    .print_receipt(&ticket)
+                    .await
+                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+            }
+        }
+    }
+
+    let document = storage::get_document(pool, document_id).await?;
+    Ok(Json(build_doc_response(pool, document).await?))
+}
+
 #[derive(Deserialize, Default)]
 pub struct CloseDocumentRequest {
+    /// Atalho mono-método (mantido para compatibilidade): regista um único
+    /// rodapé pelo total do documento. Ignorado se `payments` vier preenchido.
     pub payment_method_id: Option<Uuid>,
+    /// Rodapés de pagamento (1..N métodos). Soma >= total; o excedente é
+    /// gravado como troco no documento.
+    #[serde(default)]
+    pub payments: Vec<PaymentLineRequest>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct PaymentLineRequest {
+    pub payment_method_id: Uuid,
+    pub amount: i64,
+    pub descricao: Option<String>,
 }
 
 async fn close_document(
@@ -470,7 +880,7 @@ async fn close_document(
     body: Option<Json<CloseDocumentRequest>>,
 ) -> ApiResult<Json<DocumentResponse>> {
     let pool = state.db.pool();
-    let payment_method_id = body.and_then(|b| b.payment_method_id);
+    let req = body.map(|b| b.0).unwrap_or_default();
     let document = storage::get_document(pool, id).await?;
     if document.is_closed {
         return Err(ApiError::BadRequest("document already closed".into()));
@@ -478,8 +888,44 @@ async fn close_document(
     if document.total <= 0 {
         return Err(ApiError::BadRequest("document has no lines".into()));
     }
-    if let Some(method_id) = payment_method_id {
-        storage::record_payment(pool, document.id, method_id, document.total).await?;
+
+    // Normaliza pagamentos: lista explícita ganha sempre; senão usa o atalho
+    // mono-método (regista o total do documento como um único rodapé).
+    let payment_inputs: Vec<storage::PaymentInput> = if !req.payments.is_empty() {
+        req.payments
+            .iter()
+            .map(|p| storage::PaymentInput {
+                payment_method_id: p.payment_method_id,
+                amount: p.amount,
+                descricao: p.descricao.clone(),
+            })
+            .collect()
+    } else if let Some(method_id) = req.payment_method_id {
+        vec![storage::PaymentInput {
+            payment_method_id: method_id,
+            amount: document.total,
+            descricao: None,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    // Cada `amount` é em cêntimos e deve ser positivo. O preço da linha já reflecte
+    // o tipo_preco do local (e.g. PVP5 para consumo próprio com items grátis ou
+    // reduzidos); o somatório dos pagamentos cobre o total já apurado.
+    for p in &payment_inputs {
+        if p.amount <= 0 {
+            return Err(ApiError::BadRequest(
+                "payment amount must be positive".into(),
+            ));
+        }
+    }
+    let payments_sum: i64 = payment_inputs.iter().map(|p| p.amount).sum();
+    if !payment_inputs.is_empty() && payments_sum < document.total {
+        return Err(ApiError::BadRequest(format!(
+            "payments sum ({}) below document total ({})",
+            payments_sum, document.total
+        )));
     }
 
     // Fiscal close: allocate series number, sign, build ATCUD + QR.
@@ -545,6 +991,13 @@ async fn close_document(
     )
     .await?;
 
+    // Regista rodapés de pagamento e troco na mesma transacção fiscal: garante
+    // que o fecho é tudo-ou-nada (não há documentos "fechados" sem rodapé).
+    if !payment_inputs.is_empty() {
+        storage::record_payments_bulk_tx(&mut tx, document.id, document.total, &payment_inputs)
+            .await?;
+    }
+
     tx.commit().await?;
 
     let document = storage::get_document(pool, document.id).await?;
@@ -582,6 +1035,795 @@ fn compute_vat_breakdown(
         .collect()
 }
 
+async fn get_customers(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<Customer>>> {
+    Ok(Json(storage::list_customers(state.db.pool()).await?))
+}
+
+async fn get_customer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Customer>> {
+    Ok(Json(storage::get_customer(state.db.pool(), id).await?))
+}
+
+#[derive(Deserialize)]
+pub struct CustomerSearchQuery {
+    pub phone: Option<String>,
+    pub name: Option<String>,
+}
+
+async fn search_customers(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<CustomerSearchQuery>,
+) -> ApiResult<Json<Vec<Customer>>> {
+    Ok(Json(
+        storage::search_customers(state.db.pool(), q.phone.as_deref(), q.name.as_deref())
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct CreateCustomerRequest {
+    pub nome: String,
+    pub nif: Option<String>,
+    pub pais: Option<String>,
+    pub telefone: Option<String>,
+    pub morada: Option<String>,
+    pub cod_postal: Option<String>,
+    pub localidade: Option<String>,
+    pub email: Option<String>,
+    pub observacoes: Option<String>,
+    pub zona_id: Option<Uuid>,
+}
+
+#[derive(Serialize)]
+pub struct CustomerResponse {
+    #[serde(flatten)]
+    pub customer: Customer,
+    /// Spec §201: avisamos mas não impedimos.
+    pub nif_warning: Option<String>,
+}
+
+fn nif_warning(nif: Option<&str>, pais: &str) -> Option<String> {
+    let nif = nif?.trim();
+    if nif.is_empty() {
+        return None;
+    }
+    if pais.eq_ignore_ascii_case("PT") && !fiscal::validate_nif_pt(nif) {
+        Some("NIF PT inválido (check-digit)".into())
+    } else {
+        None
+    }
+}
+
+async fn create_customer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateCustomerRequest>,
+) -> ApiResult<(StatusCode, Json<CustomerResponse>)> {
+    let pais = req.pais.clone().unwrap_or_else(|| "PT".into());
+    let warning = nif_warning(req.nif.as_deref(), &pais);
+    let c = storage::create_customer(
+        state.db.pool(),
+        storage::NewCustomer {
+            nome: req.nome,
+            nif: req.nif,
+            pais: req.pais,
+            telefone: req.telefone,
+            morada: req.morada,
+            cod_postal: req.cod_postal,
+            localidade: req.localidade,
+            email: req.email,
+            observacoes: req.observacoes,
+            zona_id: req.zona_id,
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CustomerResponse { customer: c, nif_warning: warning }),
+    ))
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateCustomerRequest {
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub nome: OptionalField<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub nif: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub pais: OptionalField<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub telefone: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub morada: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub cod_postal: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub localidade: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub email: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub observacoes: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub zona_id: OptionalField<Option<Uuid>>,
+}
+
+async fn update_customer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateCustomerRequest>,
+) -> ApiResult<Json<CustomerResponse>> {
+    let pais_set = match &req.pais {
+        OptionalField::Set(v) => Some(v.clone()),
+        OptionalField::Missing => None,
+    };
+    let upd = storage::CustomerUpdate {
+        nome: req.nome.into_option(),
+        nif: req.nif.into_option(),
+        pais: req.pais.into_option(),
+        telefone: req.telefone.into_option(),
+        morada: req.morada.into_option(),
+        cod_postal: req.cod_postal.into_option(),
+        localidade: req.localidade.into_option(),
+        email: req.email.into_option(),
+        observacoes: req.observacoes.into_option(),
+        zona_id: req.zona_id.into_option(),
+    };
+    let nif_new = upd.nif.clone();
+    let c = storage::update_customer(state.db.pool(), id, upd).await?;
+    let pais_effective = pais_set.unwrap_or_else(|| c.pais.clone());
+    let nif_check = match nif_new {
+        Some(opt) => opt,
+        None => c.nif.clone(),
+    };
+    let warning = nif_warning(nif_check.as_deref(), &pais_effective);
+    Ok(Json(CustomerResponse { customer: c, nif_warning: warning }))
+}
+
+async fn forget_customer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Customer>> {
+    Ok(Json(storage::forget_customer(state.db.pool(), id).await?))
+}
+
+#[derive(Deserialize, Default)]
+pub struct StartLocalDocumentRequest {
+    pub employee_id: Option<Uuid>,
+    pub customer_id: Option<Uuid>,
+    pub observacoes_pedido: Option<String>,
+}
+
+async fn start_local_document(
+    State(state): State<Arc<AppState>>,
+    Path(local_id): Path<Uuid>,
+    body: Option<Json<StartLocalDocumentRequest>>,
+) -> ApiResult<Json<DocumentResponse>> {
+    let body = body.map(|b| b.0).unwrap_or_default();
+    let pool = state.db.pool();
+    let local = storage::get_local(pool, local_id).await?;
+    let business_date = state.config.business_day(Utc::now());
+    let document =
+        storage::start_document_for_local(pool, local_id, body.employee_id, business_date).await?;
+
+    let mut customer_snapshot: Option<Customer> = None;
+    if let Some(cid) = body.customer_id {
+        customer_snapshot = Some(storage::get_customer(pool, cid).await?);
+    }
+
+    if customer_snapshot.is_some() || body.observacoes_pedido.is_some() {
+        let upd = storage::DocumentContextUpdate {
+            customer_id: body.customer_id.map(Some),
+            observacoes_pedido: body.observacoes_pedido.clone().map(Some),
+            delivery_morada: customer_snapshot
+                .as_ref()
+                .and_then(|c| c.morada.clone())
+                .map(Some),
+            delivery_telefone: customer_snapshot
+                .as_ref()
+                .and_then(|c| c.telefone.clone())
+                .map(Some),
+            ..Default::default()
+        };
+        storage::update_document_context(pool, document.id, upd).await?;
+    }
+
+    // Delivery: cria o pedido_delivery + adiciona linha de taxa de entrega se o cliente
+    // tem zona com taxa configurada.
+    if matches!(local.tipo, domain::LocalKind::Delivery) {
+        let (zona_id, taxa) = if let Some(c) = customer_snapshot.as_ref() {
+            if let Some(zid) = c.zona_id {
+                let z = storage::get_zona(pool, zid).await?;
+                (Some(zid), z.taxa_entrega)
+            } else {
+                (None, 0)
+            }
+        } else {
+            (None, 0)
+        };
+        storage::create_pedido_delivery(
+            pool,
+            document.id,
+            body.customer_id,
+            customer_snapshot.as_ref().and_then(|c| c.morada.clone()),
+            customer_snapshot.as_ref().and_then(|c| c.telefone.clone()),
+            "balcao",
+            zona_id,
+            taxa,
+        )
+        .await?;
+        if taxa > 0 {
+            // Procurar artigo "Taxa de Entrega" (code 9999) e adicionar 1 unidade.
+            let articles = storage::list_articles(pool).await?;
+            if let Some(art) = articles.into_iter().find(|a| a.code == 9999) {
+                storage::add_document_line(pool, document.id, art.id, 1, taxa).await?;
+            }
+        }
+    }
+
+    let document = storage::get_document(pool, document.id).await?;
+    let _ = state
+        .event_bus
+        .publish(SystemEvent::DocumentCreated { document_id: document.id });
+    Ok(Json(build_doc_response(pool, document).await?))
+}
+
+#[derive(Deserialize)]
+pub struct OpenConsumoRequest {
+    pub employee_id: Uuid,
+}
+
+async fn open_consumo_proprio(
+    State(state): State<Arc<AppState>>,
+    Path(local_id): Path<Uuid>,
+    Json(req): Json<OpenConsumoRequest>,
+) -> ApiResult<Json<DocumentResponse>> {
+    let pool = state.db.pool();
+    let local = storage::get_local(pool, local_id).await?;
+    if !matches!(local.tipo, domain::LocalKind::ConsumoProprio) {
+        return Err(ApiError::BadRequest(
+            "este endpoint é só para locais consumo_proprio".into(),
+        ));
+    }
+    let employee = storage::get_employee(pool, req.employee_id).await?;
+    let table = storage::ensure_consumo_table(pool, local_id, &employee).await?;
+    let business_date = state.config.business_day(Utc::now());
+    let document =
+        storage::open_table(pool, table.id, Some(employee.id), business_date).await?;
+    Ok(Json(build_doc_response(pool, document).await?))
+}
+
+#[derive(Deserialize, Default)]
+pub struct DocumentContextRequest {
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub customer_id: OptionalField<Option<Uuid>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub observacoes_pedido: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub observacoes_factura: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub observacoes_cliente: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub observacoes_morada: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub delivery_morada: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub delivery_telefone: OptionalField<Option<String>>,
+}
+
+async fn set_document_context(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<DocumentContextRequest>,
+) -> ApiResult<Json<DocumentResponse>> {
+    let pool = state.db.pool();
+    let upd = storage::DocumentContextUpdate {
+        customer_id: req.customer_id.into_option(),
+        observacoes_pedido: req.observacoes_pedido.into_option(),
+        observacoes_factura: req.observacoes_factura.into_option(),
+        observacoes_cliente: req.observacoes_cliente.into_option(),
+        observacoes_morada: req.observacoes_morada.into_option(),
+        delivery_morada: req.delivery_morada.into_option(),
+        delivery_telefone: req.delivery_telefone.into_option(),
+    };
+    let doc = storage::update_document_context(pool, id, upd).await?;
+    Ok(Json(build_doc_response(pool, doc).await?))
+}
+
+async fn get_active_deliveries(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Vec<PedidoDelivery>>> {
+    Ok(Json(
+        storage::list_active_pedidos_delivery(state.db.pool()).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateDeliveryStateRequest {
+    pub estado: String,
+    pub entregador_id: Option<Uuid>,
+}
+
+async fn update_delivery_state(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateDeliveryStateRequest>,
+) -> ApiResult<Json<PedidoDelivery>> {
+    let estado = DeliveryEstado::parse(&req.estado)
+        .ok_or_else(|| ApiError::BadRequest(format!("estado inválido: {}", req.estado)))?;
+    Ok(Json(
+        storage::update_delivery_estado(state.db.pool(), id, estado, req.entregador_id).await?,
+    ))
+}
+
+async fn get_tipos_preco(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<TipoPreco>>> {
+    Ok(Json(storage::list_tipos_preco(state.db.pool()).await?))
+}
+
+async fn get_zonas(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<Zona>>> {
+    Ok(Json(storage::list_zonas(state.db.pool()).await?))
+}
+
+#[derive(Deserialize)]
+pub struct CreateZonaRequest {
+    pub designacao: String,
+    pub codigo: Option<i32>,
+    #[serde(default)]
+    pub taxa_entrega: i64,
+}
+
+async fn create_zona(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateZonaRequest>,
+) -> ApiResult<(StatusCode, Json<Zona>)> {
+    let z = storage::create_zona(
+        state.db.pool(),
+        storage::NewZona {
+            designacao: req.designacao,
+            codigo: req.codigo,
+            taxa_entrega: req.taxa_entrega,
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(z)))
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateZonaRequest {
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub designacao: OptionalField<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub codigo: OptionalField<Option<i32>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub taxa_entrega: OptionalField<i64>,
+}
+
+async fn update_zona(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateZonaRequest>,
+) -> ApiResult<Json<Zona>> {
+    let upd = storage::ZonaUpdate {
+        designacao: req.designacao.into_option(),
+        codigo: req.codigo.into_option(),
+        taxa_entrega: req.taxa_entrega.into_option(),
+    };
+    Ok(Json(storage::update_zona(state.db.pool(), id, upd).await?))
+}
+
+async fn delete_zona(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    storage::delete_zona(state.db.pool(), id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_entregadores(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Vec<Entregador>>> {
+    Ok(Json(storage::list_entregadores(state.db.pool()).await?))
+}
+
+#[derive(Deserialize)]
+pub struct CreateEntregadorRequest {
+    pub nome: String,
+    pub telefone: Option<String>,
+    #[serde(default = "default_externo")]
+    pub externo: bool,
+}
+
+fn default_externo() -> bool { true }
+
+async fn create_entregador(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateEntregadorRequest>,
+) -> ApiResult<(StatusCode, Json<Entregador>)> {
+    let e = storage::create_entregador(
+        state.db.pool(),
+        storage::NewEntregador {
+            nome: req.nome,
+            telefone: req.telefone,
+            externo: req.externo,
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(e)))
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateEntregadorRequest {
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub nome: OptionalField<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub telefone: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub externo: OptionalField<bool>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub ativo: OptionalField<bool>,
+}
+
+async fn update_entregador(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateEntregadorRequest>,
+) -> ApiResult<Json<Entregador>> {
+    let upd = storage::EntregadorUpdate {
+        nome: req.nome.into_option(),
+        telefone: req.telefone.into_option(),
+        externo: req.externo.into_option(),
+        ativo: req.ativo.into_option(),
+    };
+    Ok(Json(
+        storage::update_entregador(state.db.pool(), id, upd).await?,
+    ))
+}
+
+async fn delete_entregador(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    storage::delete_entregador(state.db.pool(), id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_zonas_impressao(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Vec<ZonaImpressao>>> {
+    Ok(Json(storage::list_zonas_impressao(state.db.pool()).await?))
+}
+
+#[derive(Deserialize)]
+pub struct CreateZonaImpressaoRequest {
+    pub codigo: i32,
+    pub designacao: String,
+    #[serde(default)]
+    pub secundarios: bool,
+}
+
+async fn create_zona_impressao(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateZonaImpressaoRequest>,
+) -> ApiResult<(StatusCode, Json<ZonaImpressao>)> {
+    let z = storage::create_zona_impressao(
+        state.db.pool(),
+        storage::NewZonaImpressao {
+            codigo: req.codigo,
+            designacao: req.designacao,
+            secundarios: req.secundarios,
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(z)))
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateZonaImpressaoRequest {
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub codigo: OptionalField<i32>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub designacao: OptionalField<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub secundarios: OptionalField<bool>,
+}
+
+async fn update_zona_impressao(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateZonaImpressaoRequest>,
+) -> ApiResult<Json<ZonaImpressao>> {
+    let upd = storage::ZonaImpressaoUpdate {
+        codigo: req.codigo.into_option(),
+        designacao: req.designacao.into_option(),
+        secundarios: req.secundarios.into_option(),
+    };
+    Ok(Json(
+        storage::update_zona_impressao(state.db.pool(), id, upd).await?,
+    ))
+}
+
+async fn delete_zona_impressao(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    storage::delete_zona_impressao(state.db.pool(), id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_dispositivos(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Vec<Dispositivo>>> {
+    Ok(Json(storage::list_dispositivos(state.db.pool()).await?))
+}
+
+#[derive(Deserialize)]
+pub struct CreateDispositivoRequest {
+    pub nome: String,
+    #[serde(default = "default_tipo_disp")]
+    pub tipo: String,
+    pub modelo: Option<String>,
+    pub descricao: Option<String>,
+    pub output_path: Option<String>,
+}
+
+fn default_tipo_disp() -> String {
+    "impressora_generica".into()
+}
+
+async fn create_dispositivo(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateDispositivoRequest>,
+) -> ApiResult<(StatusCode, Json<Dispositivo>)> {
+    let d = storage::create_dispositivo(
+        state.db.pool(),
+        storage::NewDispositivo {
+            nome: req.nome,
+            tipo: req.tipo,
+            modelo: req.modelo,
+            descricao: req.descricao,
+            output_path: req.output_path,
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(d)))
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateDispositivoRequest {
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub nome: OptionalField<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub tipo: OptionalField<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub modelo: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub descricao: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub output_path: OptionalField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub ativo: OptionalField<bool>,
+}
+
+async fn update_dispositivo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateDispositivoRequest>,
+) -> ApiResult<Json<Dispositivo>> {
+    let upd = storage::DispositivoUpdate {
+        nome: req.nome.into_option(),
+        tipo: req.tipo.into_option(),
+        modelo: req.modelo.into_option(),
+        descricao: req.descricao.into_option(),
+        output_path: req.output_path.into_option(),
+        ativo: req.ativo.into_option(),
+    };
+    Ok(Json(
+        storage::update_dispositivo(state.db.pool(), id, upd).await?,
+    ))
+}
+
+async fn delete_dispositivo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    storage::delete_dispositivo(state.db.pool(), id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_print_mappings(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Vec<ImpressoraZonaLocal>>> {
+    Ok(Json(storage::list_print_mappings(state.db.pool()).await?))
+}
+
+#[derive(Deserialize)]
+pub struct CreateMappingRequest {
+    pub zona_impressao_id: Uuid,
+    pub local_id: Uuid,
+    pub origem_id: Option<Uuid>,
+    pub dispositivo_id: Uuid,
+    #[serde(default = "default_agrupamento")]
+    pub agrupamento: String,
+    #[serde(default = "default_copias")]
+    pub numero_copias: i32,
+}
+
+fn default_agrupamento() -> String { "normal".into() }
+fn default_copias() -> i32 { 1 }
+
+async fn create_print_mapping(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateMappingRequest>,
+) -> ApiResult<(StatusCode, Json<ImpressoraZonaLocal>)> {
+    let m = storage::create_print_mapping(
+        state.db.pool(),
+        storage::NewMapping {
+            zona_impressao_id: req.zona_impressao_id,
+            local_id: req.local_id,
+            origem_id: req.origem_id,
+            dispositivo_id: req.dispositivo_id,
+            agrupamento: req.agrupamento,
+            numero_copias: req.numero_copias,
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(m)))
+}
+
+async fn delete_print_mapping(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    storage::delete_print_mapping(state.db.pool(), id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// "Pedir": agrupa as linhas pendentes por zona de impressão e imprime no dispositivo
+/// configurado para cada (zona, local). Linhas sem zona caem na zona "Documentos Externos"
+/// — não são impressas aqui (vão no documento legal).
+async fn pedir_document(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<DocumentResponse>> {
+    use std::collections::BTreeMap;
+
+    let pool = state.db.pool();
+    let document = storage::get_document(pool, id).await?;
+    let local_id = document
+        .local_id
+        .ok_or_else(|| ApiError::BadRequest("documento sem local associado".into()))?;
+    let local = storage::get_local(pool, local_id).await?;
+    let table_label = match document.table_id {
+        Some(tid) => storage::get_table(pool, tid)
+            .await
+            .ok()
+            .and_then(|t| t.name.or(Some(format!("Mesa {}", t.code))))
+            .unwrap_or_else(|| "Mesa".into()),
+        None => "Balcão".into(),
+    };
+
+    let lines = storage::list_document_details(pool, document.id).await?;
+    let pending: Vec<&DocumentDetail> = lines.iter().filter(|l| l.pedida_em.is_none()).collect();
+    if pending.is_empty() {
+        return Ok(Json(build_doc_response(pool, document).await?));
+    }
+
+    let mut articles_by_id = std::collections::HashMap::new();
+    for line in &pending {
+        if !articles_by_id.contains_key(&line.article_id) {
+            let a = storage::get_article(pool, line.article_id).await?;
+            articles_by_id.insert(line.article_id, a);
+        }
+    }
+
+    let mut by_zone: BTreeMap<Uuid, Vec<&DocumentDetail>> = BTreeMap::new();
+    let mut without_zone: Vec<&DocumentDetail> = Vec::new();
+    for line in &pending {
+        let art = &articles_by_id[&line.article_id];
+        if let Some(z) = art.zona_impressao_id {
+            by_zone.entry(z).or_default().push(*line);
+        } else {
+            without_zone.push(*line);
+        }
+    }
+
+    // Pré-carrega todas as zonas envolvidas (para saber quais são secundárias).
+    let mut zonas: std::collections::HashMap<Uuid, ZonaImpressao> =
+        std::collections::HashMap::new();
+    for zid in by_zone.keys() {
+        zonas.insert(*zid, storage::get_zona_impressao(pool, *zid).await?);
+    }
+
+    // Conjunto de zonas secundárias com linhas neste lote — entre estas há
+    // espelho cruzado ("sai junto com") (spec 03/05 §4).
+    let secondary_zones: Vec<Uuid> = by_zone
+        .keys()
+        .filter(|z| zonas.get(z).map(|z| z.secundarios).unwrap_or(false))
+        .copied()
+        .collect();
+
+    let now = chrono::Utc::now();
+    let mut printed_line_ids: Vec<Uuid> = Vec::new();
+
+    for (zona_id, ls) in by_zone.iter() {
+        let Some(dispositivo) =
+            storage::dispositivo_for_zona_local(pool, *zona_id, local.id).await?
+        else {
+            tracing::warn!(
+                "sem mapping para zona {} no local {}; linhas saltadas",
+                zona_id,
+                local.id
+            );
+            continue;
+        };
+        let zona = &zonas[zona_id];
+        let kitchen_lines: Vec<devices::escpos::KitchenLine> = ls
+            .iter()
+            .map(|l| devices::escpos::KitchenLine {
+                qty: l.qty,
+                name: &articles_by_id[&l.article_id].name,
+            })
+            .collect();
+
+        // Se esta zona é secundária e há mais de uma zona secundária no lote,
+        // anexa um bloco "sai junto com" por cada uma das outras zonas secundárias.
+        let mut cross_storage: Vec<(String, Vec<devices::escpos::KitchenLine>)> = Vec::new();
+        if zona.secundarios {
+            for other_id in secondary_zones.iter() {
+                if other_id == zona_id {
+                    continue;
+                }
+                let other_zona = &zonas[other_id];
+                let other_lines: Vec<devices::escpos::KitchenLine> = by_zone[other_id]
+                    .iter()
+                    .map(|l| devices::escpos::KitchenLine {
+                        qty: l.qty,
+                        name: &articles_by_id[&l.article_id].name,
+                    })
+                    .collect();
+                cross_storage.push((other_zona.designacao.clone(), other_lines));
+            }
+        }
+        let cross_blocks: Vec<devices::escpos::CrossZoneBlock> = cross_storage
+            .iter()
+            .map(|(name, lines)| devices::escpos::CrossZoneBlock {
+                zona: name,
+                lines,
+            })
+            .collect();
+
+        let ticket = devices::escpos::format_kitchen_ticket(
+            &zona.designacao,
+            &local.designacao,
+            &table_label,
+            now,
+            &kitchen_lines,
+            &cross_blocks,
+        );
+        if let Some(path) = &dispositivo.output_path {
+            let printer = devices::GenericPrinter::new(std::path::PathBuf::from(path));
+            printer
+                .print_receipt(&ticket)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+        for l in ls {
+            printed_line_ids.push(l.id);
+        }
+    }
+    // Linhas sem zona ainda são marcadas como pedidas (não imprimem ticket de cozinha).
+    for l in &without_zone {
+        printed_line_ids.push(l.id);
+    }
+
+    storage::mark_lines_pedidas(pool, document.id, &printed_line_ids).await?;
+    let document = storage::get_document(pool, document.id).await?;
+    let _ = state
+        .event_bus
+        .publish(SystemEvent::DocumentLineAdded { document_id: document.id });
+    Ok(Json(build_doc_response(pool, document).await?))
+}
+
 async fn print_document(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
@@ -613,11 +1855,16 @@ async fn print_document(
     let payments_with_label: Vec<(String, i64)> = payments
         .iter()
         .map(|p| {
-            let label = payment_methods
+            let method = payment_methods
                 .iter()
                 .find(|m| m.id == p.payment_method_id)
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| "?".into());
+            // Anexa a descrição livre (e.g., "Visa **1234") ao rótulo quando preenchida.
+            let label = match p.descricao.as_deref() {
+                Some(d) if !d.is_empty() => format!("{} {}", method, d),
+                _ => method,
+            };
             (label, p.amount)
         })
         .collect();
@@ -679,6 +1926,7 @@ async fn print_document(
         vat_rows,
         total: document.total,
         payments: payments_with_label,
+        troco_cents: document.troco_cents,
         qr_block: &qr_block,
         qr_payload: document.qr_payload.as_deref().unwrap_or(""),
     });

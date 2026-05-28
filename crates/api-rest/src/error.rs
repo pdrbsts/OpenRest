@@ -10,6 +10,8 @@ pub enum ApiError {
     BadRequest(String),
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
+    #[error("{0}")]
+    Forbidden(String),
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -37,6 +39,7 @@ impl IntoResponse for ApiError {
                 tracing::error!("storage error: {e}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "storage error".into())
             }
+            ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, self.to_string()),
             ApiError::Internal(_) => {
                 tracing::error!("internal error: {self}");
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())

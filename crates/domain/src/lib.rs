@@ -1,6 +1,126 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Spec §57 "Data Lógica de Caixa": calcula o Dia de facturação a partir do
+/// instante do relógio (em hora local da loja) e do ponto de corte.
+///
+/// `cutoff_minutes` é o nº de minutos desde a meia-noite a partir do qual já
+/// estamos num novo Dia (ex: 02:00 → 120). Por defeito 0 (dia civil normal).
+///
+/// Antes do corte → o documento entra no Dia anterior.
+pub fn compute_business_day(now_local: NaiveDateTime, cutoff_minutes: u32) -> NaiveDate {
+    let minutes_today = now_local.time().num_seconds_from_midnight() / 60;
+    if minutes_today < cutoff_minutes {
+        now_local.date() - Duration::days(1)
+    } else {
+        now_local.date()
+    }
+}
+
+/// Converte `HH:MM` para nº de minutos desde a meia-noite. Retorna `None` se
+/// o formato for inválido ou os valores fora de gama.
+pub fn parse_cutoff_hhmm(s: &str) -> Option<u32> {
+    let (h, m) = s.split_once(':')?;
+    let h: u32 = h.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    if h >= 24 || m >= 60 {
+        return None;
+    }
+    Some(h * 60 + m)
+}
+
+/// Converte um instante UTC para hora local aplicando um offset em minutos.
+pub fn utc_to_local(now_utc: DateTime<Utc>, tz_offset_minutes: i32) -> NaiveDateTime {
+    (now_utc + Duration::minutes(tz_offset_minutes as i64)).naive_utc()
+}
+
+#[cfg(test)]
+mod business_day_tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn dt(y: i32, m: u32, d: u32, h: u32, min: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(h, min, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn cafe_cutoff_02_00() {
+        let cutoff = parse_cutoff_hhmm("02:00").unwrap();
+        // 23:00 do dia 27 → Dia = 27 (já passou as 02:00 da manhã desse dia)
+        assert_eq!(
+            compute_business_day(dt(2026, 5, 27, 23, 0), cutoff),
+            NaiveDate::from_ymd_opt(2026, 5, 27).unwrap()
+        );
+        // 00:30 do dia 28 → Dia = 27 (ainda não chegou ao corte das 02:00)
+        assert_eq!(
+            compute_business_day(dt(2026, 5, 28, 0, 30), cutoff),
+            NaiveDate::from_ymd_opt(2026, 5, 27).unwrap()
+        );
+        // 01:59 do dia 28 → Dia = 27 (fronteira inclusiva)
+        assert_eq!(
+            compute_business_day(dt(2026, 5, 28, 1, 59), cutoff),
+            NaiveDate::from_ymd_opt(2026, 5, 27).unwrap()
+        );
+        // 02:00 exactas do dia 28 → Dia = 28 (corte é >=)
+        assert_eq!(
+            compute_business_day(dt(2026, 5, 28, 2, 0), cutoff),
+            NaiveDate::from_ymd_opt(2026, 5, 28).unwrap()
+        );
+        // 02:15 do dia 28 → Dia = 28
+        assert_eq!(
+            compute_business_day(dt(2026, 5, 28, 2, 15), cutoff),
+            NaiveDate::from_ymd_opt(2026, 5, 28).unwrap()
+        );
+        // 08:00 do dia 28 → Dia = 28
+        assert_eq!(
+            compute_business_day(dt(2026, 5, 28, 8, 0), cutoff),
+            NaiveDate::from_ymd_opt(2026, 5, 28).unwrap()
+        );
+    }
+
+    #[test]
+    fn cutoff_zero_is_civil_day() {
+        // Sem corte → dia civil normal.
+        assert_eq!(
+            compute_business_day(dt(2026, 5, 28, 0, 0), 0),
+            NaiveDate::from_ymd_opt(2026, 5, 28).unwrap()
+        );
+        assert_eq!(
+            compute_business_day(dt(2026, 5, 28, 23, 59), 0),
+            NaiveDate::from_ymd_opt(2026, 5, 28).unwrap()
+        );
+    }
+
+    #[test]
+    fn month_and_year_rollback() {
+        let cutoff = parse_cutoff_hhmm("03:00").unwrap();
+        // 01 Jan às 01:00 → Dia = 31 Dez do ano anterior.
+        assert_eq!(
+            compute_business_day(dt(2027, 1, 1, 1, 0), cutoff),
+            NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()
+        );
+        // 01 Jun às 02:30 → Dia = 31 Mai.
+        assert_eq!(
+            compute_business_day(dt(2026, 6, 1, 2, 30), cutoff),
+            NaiveDate::from_ymd_opt(2026, 5, 31).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_cutoff_strings() {
+        assert_eq!(parse_cutoff_hhmm("00:00"), Some(0));
+        assert_eq!(parse_cutoff_hhmm("02:00"), Some(120));
+        assert_eq!(parse_cutoff_hhmm("23:59"), Some(23 * 60 + 59));
+        assert_eq!(parse_cutoff_hhmm("24:00"), None);
+        assert_eq!(parse_cutoff_hhmm("12:60"), None);
+        assert_eq!(parse_cutoff_hhmm("abc"), None);
+        assert_eq!(parse_cutoff_hhmm(""), None);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Family {
@@ -16,11 +136,94 @@ pub struct Article {
     pub family_id: Option<Uuid>,
     pub code: i32,
     pub name: String,
-    pub price: i64,
+    /// 5 tabelas de preço (PVP1..PVP5), em cêntimos. Cada local escolhe via tipo_preco.
+    /// pvp2..pvp5 são opcionais: `None` significa "não configurado, usa pvp1";
+    /// `Some(0)` significa "grátis".
+    pub pvp1: i64,
+    pub pvp2: Option<i64>,
+    pub pvp3: Option<i64>,
+    pub pvp4: Option<i64>,
+    pub pvp5: Option<i64>,
     /// IVA em basis points (1300 = 13%).
     pub vat_rate: i32,
+    /// normal | complemento | informativo | consumo | gorjeta
+    pub tipo_artigo: String,
+    pub zona_impressao_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Article {
+    /// Devolve o PVP correspondente ao código de tabela (1..5).
+    /// Quando o PVP escolhido é `None`, faz fallback para pvp1; `Some(0)` significa grátis.
+    pub fn pvp_for(&self, codigo: i32) -> i64 {
+        match codigo {
+            2 => self.pvp2.unwrap_or(self.pvp1),
+            3 => self.pvp3.unwrap_or(self.pvp1),
+            4 => self.pvp4.unwrap_or(self.pvp1),
+            5 => self.pvp5.unwrap_or(self.pvp1),
+            _ => self.pvp1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TipoPreco {
+    pub id: Uuid,
+    pub codigo: i32,
+    pub designacao: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Zona {
+    pub id: Uuid,
+    pub codigo: Option<i32>,
+    pub designacao: String,
+    pub taxa_entrega: i64,
+    pub rede_remota_associada_id: Option<Uuid>,
+    pub anulado_em: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Entregador {
+    pub id: Uuid,
+    pub nome: String,
+    pub telefone: Option<String>,
+    pub externo: bool,
+    pub ativo: bool,
+    pub anulado_em: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Dispositivo {
+    pub id: Uuid,
+    pub nome: String,
+    pub tipo: String,
+    pub modelo: Option<String>,
+    pub descricao: Option<String>,
+    pub output_path: Option<String>,
+    pub ativo: bool,
+    pub anulado_em: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ZonaImpressao {
+    pub id: Uuid,
+    pub codigo: i32,
+    pub designacao: String,
+    pub secundarios: bool,
+    pub anulado_em: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImpressoraZonaLocal {
+    pub id: Uuid,
+    pub zona_impressao_id: Uuid,
+    pub local_id: Uuid,
+    pub origem_id: Option<Uuid>,
+    pub dispositivo_id: Uuid,
+    pub agrupamento: String,
+    pub numero_copias: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Copy, Eq, Hash)]
@@ -192,6 +395,32 @@ pub struct Employee {
     /// (basis points: 10000 = 100%, 5000 = 50%).
     pub perc_consumo: i32,
     pub base_consumo: i64,
+    pub nivel_acesso_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NivelAcesso {
+    pub id: Uuid,
+    pub codigo: i32,
+    pub designacao: String,
+    pub cancela_pedidos: bool,
+    pub anula_pedidos: bool,
+    pub anula_pedidos_com_conta_impressa: bool,
+    pub transfere_pedidos: bool,
+    pub transfere_pedidos_com_conta_impressa: bool,
+    pub anulado_em: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Transferencia {
+    pub id: Uuid,
+    pub from_document_id: Uuid,
+    pub to_document_id: Uuid,
+    pub line_id: Uuid,
+    pub article_id: Uuid,
+    pub qty: i64,
+    pub employee_id: Option<Uuid>,
+    pub transferida_em: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -200,6 +429,7 @@ pub struct Customer {
     pub codigo: Option<i32>,
     pub nome: String,
     pub nif: Option<String>,
+    pub pais: String,
     pub telefone: Option<String>,
     pub morada: Option<String>,
     pub cod_postal: Option<String>,
@@ -210,6 +440,7 @@ pub struct Customer {
     pub limite_credito: i64,
     pub zona_id: Option<Uuid>,
     pub anulado_em: Option<DateTime<Utc>>,
+    pub esquecido_em: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -262,6 +493,8 @@ pub struct PedidoDelivery {
     pub despachado_em: Option<DateTime<Utc>>,
     pub entregue_em: Option<DateTime<Utc>>,
     pub estado: DeliveryEstado,
+    pub zona_id: Option<Uuid>,
+    pub taxa_entrega_cents: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -320,6 +553,25 @@ pub struct Document {
     pub observacoes_morada: Option<String>,
     pub delivery_morada: Option<String>,
     pub delivery_telefone: Option<String>,
+    pub subtotal_impresso_em: Option<DateTime<Utc>>,
+    pub data_dia: Option<NaiveDate>,
+    pub sessao_id: Option<Uuid>,
+    pub troco_cents: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessaoEmpregado {
+    pub id: Uuid,
+    pub empregado_id: Uuid,
+    pub data_dia: NaiveDate,
+    pub com_bolsa: bool,
+    pub fundo_bolsa: i64,
+    pub observacao_abertura: Option<String>,
+    pub observacao_fecho: Option<String>,
+    pub aberta_em: DateTime<Utc>,
+    pub aberta_por: Option<Uuid>,
+    pub fechada_em: Option<DateTime<Utc>>,
+    pub fechada_por: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -330,14 +582,54 @@ pub struct DocumentDetail {
     pub qty: i32,
     pub unit_price: i64,
     pub total: i64,
+    pub pedida_em: Option<DateTime<Utc>>,
+    pub anulada: bool,
+    pub anulada_com_desperdicio: bool,
+    pub anulada_em: Option<DateTime<Utc>>,
+    pub anulada_por: Option<Uuid>,
+    pub anulada_motivo: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Anulacao {
+    pub id: Uuid,
+    pub document_id: Uuid,
+    pub document_detail_id: Uuid,
+    pub article_id: Uuid,
+    pub qty: i32,
+    pub unit_price: i64,
+    pub total: i64,
+    pub com_desperdicio: bool,
+    pub motivo: Option<String>,
+    pub empregado_id: Option<Uuid>,
+    pub anulada_em: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Cancelamento {
+    pub id: Uuid,
+    pub document_id: Uuid,
+    pub article_id: Uuid,
+    pub qty: i32,
+    pub unit_price: i64,
+    pub total: i64,
+    pub motivo: Option<String>,
+    pub empregado_id: Option<Uuid>,
+    pub cancelada_em: DateTime<Utc>,
+}
+
+/// Rodapé de pagamento de um documento. Um documento pode ter N rodapés
+/// (múltiplos métodos de pagamento). O `amount` é em cêntimos (i64) e o
+/// somatório dos pagamentos cobre o total do documento; quando soma > total,
+/// o excedente é registado em `Document.troco_cents` e o último método
+/// (normalmente numerário) absorve a diferença.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Payment {
     pub id: Uuid,
     pub document_id: Uuid,
     pub payment_method_id: Uuid,
     pub amount: i64,
+    pub descricao: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -349,8 +641,14 @@ impl Article {
             family_id: None,
             code,
             name,
-            price,
+            pvp1: price,
+            pvp2: None,
+            pvp3: None,
+            pvp4: None,
+            pvp5: None,
             vat_rate: 1300,
+            tipo_artigo: "normal".into(),
+            zona_impressao_id: None,
             created_at: now,
             updated_at: now,
         }

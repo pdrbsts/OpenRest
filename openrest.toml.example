@@ -5,6 +5,18 @@ printer_output_path = "./receipts.txt"
 terminal_label = "Terminal 1"
 signing_key_path = "./openrest_signing.pem"
 
+# Audit. Anulações são sempre registadas; cancelamentos são opcionais.
+registar_cancelamentos = false
+
+# Dia operacional (spec §57 "Data Lógica de Caixa"). `cutoff` é a hora a
+# partir da qual o programa considera que estamos num novo Dia de
+# facturação. Útil em estabelecimentos que fecham após a meia-noite — um
+# café aberto até à 01:00 configura "02:00" para garantir que tudo o que
+# entra antes desse instante fica imputado ao Dia anterior.
+[business_day]
+cutoff = "00:00"
+tz_offset_minutes = 0
+
 [company]
 nif = "999999990"
 legal_name = "OpenRest Demo, Lda."

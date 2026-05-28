@@ -214,25 +214,37 @@ Campos:
 - **Parcial** — pagar só alguns artigos
 - **Múltipla** — dividir o consumo em N facturas
 
+#### Modelo de dados (rodapés de documento)
+
+Um documento pode ter 1..N **rodapés de pagamento** (tabela `payments`), cada um com `payment_method_id`, `amount` em cêntimos e `descricao` opcional. O somatório dos rodapés cobre o `Document.total`; quando a soma excede o total, o excedente é gravado em `Document.troco_cents`. O fecho fiscal e o registo dos rodapés acontecem numa única transacção (tudo-ou-nada).
+
 Fluxos:
 
 #### Pagamento exacto múltiplo
 1. Introduzir valor → premir método 1 → introduzir resto → premir método 2 → …
 2. OK só fica activo quando totaliza.
 
+> **Implementado** em v0.5.0-alpha. Endpoint `POST /api/documents/:id/close` aceita `{ payments: [{ payment_method_id, amount, descricao? }] }` e valida `sum >= total`.
+
 #### Pagamento com troco
 - Inserir valor maior que total → premir método (Numerário)
 - Sistema calcula troco
+
+> **Implementado** — `troco = sum - total` quando positivo é guardado em `documents.troco_cents` e impresso no recibo.
 
 #### Pagamento Parcial
 - Selecciona artigos → premir Pagamento Parcial → OK
 - Gera factura/VD apenas com esses artigos
 - Mesa continua aberta
 
+> **Adiado** para iteração seguinte da Fase 2 (requer modelo de documento-filho).
+
 #### Divisão de Conta
 - Introduz nº contas → janela de divisão (manual ou automática)
 - Setas de transferência de artigos entre contas
 - Botão "Divisão Automática" tenta dividir mantendo o total da conta o mais próximo possível do pretendido
+
+> **Adiado** para iteração seguinte da Fase 2.
 
 ### 8.3 Conta Corrente do Cliente
 

@@ -16,7 +16,18 @@ struct BackendConfig {
     printer_output_path: String,
     terminal_label: String,
     signing_key_path: String,
+    registar_cancelamentos: bool,
     company: CompanyConfig,
+    business_day: BusinessDayConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct BusinessDayConfig {
+    /// Hora "HH:MM" a partir da qual é um novo Dia operacional. Default "00:00".
+    cutoff: String,
+    /// Offset do fuso da loja relativo a UTC, em minutos. Default 0.
+    tz_offset_minutes: i32,
 }
 
 impl Default for BackendConfig {
@@ -27,7 +38,9 @@ impl Default for BackendConfig {
             printer_output_path: "./receipts.txt".into(),
             terminal_label: "Terminal 1".into(),
             signing_key_path: "./openrest_signing.pem".into(),
+            registar_cancelamentos: false,
             company: CompanyConfig::default(),
+            business_day: BusinessDayConfig::default(),
         }
     }
 }
@@ -81,11 +94,31 @@ async fn main() -> Result<()> {
     .context("signing key task join")?
     .context("load/generate signing key")?;
 
+    let cutoff_minutes = if cfg.business_day.cutoff.is_empty() {
+        0
+    } else {
+        domain::parse_cutoff_hhmm(&cfg.business_day.cutoff).unwrap_or_else(|| {
+            tracing::warn!(
+                "business_day.cutoff='{}' inválido — a usar 00:00",
+                cfg.business_day.cutoff
+            );
+            0
+        })
+    };
+    tracing::info!(
+        "Dia operacional: cutoff={}m, tz_offset={}m",
+        cutoff_minutes,
+        cfg.business_day.tz_offset_minutes
+    );
+
     let app_config = AppConfig {
         printer_output_path: PathBuf::from(&cfg.printer_output_path),
         terminal_label: cfg.terminal_label,
         company: cfg.company,
         signing_key: Arc::new(signing_key),
+        registar_cancelamentos: cfg.registar_cancelamentos,
+        business_day_cutoff_minutes: cutoff_minutes,
+        business_day_tz_offset_minutes: cfg.business_day.tz_offset_minutes,
     };
 
     let state = Arc::new(AppState::new(db, app_config));

@@ -34,6 +34,7 @@ pub struct ReceiptCtx<'a> {
     pub vat_rows: Vec<VatRow>,
     pub total: i64,
     pub payments: Vec<(String, i64)>,
+    pub troco_cents: i64,
     pub qr_block: &'a str,
     pub qr_payload: &'a str,
 }
@@ -79,6 +80,115 @@ fn center(s: &str, n: usize) -> String {
 
 fn sep() -> String {
     "-".repeat(WIDTH)
+}
+
+pub struct KitchenLine<'a> {
+    pub qty: i32,
+    pub name: &'a str,
+}
+
+/// Bloco de pedido cruzado: "sai junto com" os itens desta outra zona.
+pub struct CrossZoneBlock<'a> {
+    pub zona: &'a str,
+    pub lines: &'a [KitchenLine<'a>],
+}
+
+/// Formata um talão de pedido para uma zona (cozinha/bar). Sem totais nem IVA.
+/// `cross_zones` lista itens que saem em paralelo em outras zonas marcadas como
+/// secundárias (spec 10.3 `secundarios=true`) — aparecem em letra "pequena"
+/// (indentação + prefixo `*`).
+pub fn format_kitchen_ticket(
+    zona: &str,
+    local: &str,
+    table_label: &str,
+    when: DateTime<Utc>,
+    lines: &[KitchenLine<'_>],
+    cross_zones: &[CrossZoneBlock<'_>],
+) -> String {
+    let mut out = String::new();
+    out.push_str(&center(&format!("== {} ==", zona.to_uppercase()), WIDTH));
+    out.push('\n');
+    out.push_str(&sep());
+    out.push('\n');
+    out.push_str(&pad_right(&format!("{}  {}", local, table_label), WIDTH));
+    out.push('\n');
+    out.push_str(&pad_right(&when.format("%Y-%m-%d %H:%M:%S").to_string(), WIDTH));
+    out.push('\n');
+    out.push_str(&sep());
+    out.push('\n');
+    for line in lines {
+        let qty = format!("{}x", line.qty);
+        out.push_str(&pad_left(&qty, 3));
+        out.push(' ');
+        out.push_str(&pad_right(line.name, WIDTH - 4));
+        out.push('\n');
+    }
+    out.push_str(&sep());
+    out.push('\n');
+
+    if !cross_zones.is_empty() {
+        out.push_str(&center("-- Sai junto com --", WIDTH));
+        out.push('\n');
+        for block in cross_zones {
+            out.push_str(&pad_right(&format!("  [{}]", block.zona), WIDTH));
+            out.push('\n');
+            for line in block.lines {
+                let qty = format!("{}x", line.qty);
+                out.push_str("    ");
+                out.push_str(&pad_left(&qty, 3));
+                out.push(' ');
+                out.push_str(&pad_right(line.name, WIDTH - 8));
+                out.push('\n');
+            }
+        }
+        out.push_str(&sep());
+        out.push('\n');
+    }
+
+    out
+}
+
+/// Ticket de anulação para a zona original (cozinha/bar).
+pub fn format_anulacao_ticket(
+    zona: &str,
+    local: &str,
+    table_label: &str,
+    when: DateTime<Utc>,
+    qty: i32,
+    artigo: &str,
+    com_desperdicio: bool,
+    motivo: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&center(&format!("** ANULAÇÃO {} **", zona.to_uppercase()), WIDTH));
+    out.push('\n');
+    out.push_str(&sep());
+    out.push('\n');
+    out.push_str(&pad_right(&format!("{}  {}", local, table_label), WIDTH));
+    out.push('\n');
+    out.push_str(&pad_right(&when.format("%Y-%m-%d %H:%M:%S").to_string(), WIDTH));
+    out.push('\n');
+    out.push_str(&sep());
+    out.push('\n');
+    let qty_s = format!("{}x", qty);
+    out.push_str(&pad_left(&qty_s, 3));
+    out.push(' ');
+    out.push_str(&pad_right(artigo, WIDTH - 4));
+    out.push('\n');
+    out.push_str(&center(
+        if com_desperdicio { "(com desperdício)" } else { "(sem desperdício)" },
+        WIDTH,
+    ));
+    out.push('\n');
+    if let Some(m) = motivo {
+        if !m.is_empty() {
+            out.push_str(&pad_right(&format!("Motivo: {}", m), WIDTH));
+            out.push('\n');
+        }
+    }
+    out.push_str(&sep());
+    out.push('\n');
+    out
 }
 
 pub fn format_legal_receipt(ctx: ReceiptCtx<'_>) -> String {
@@ -184,6 +294,11 @@ pub fn format_legal_receipt(ctx: ReceiptCtx<'_>) -> String {
         for (method, amount) in &ctx.payments {
             out.push_str(&pad_right(method, WIDTH - 12));
             out.push_str(&pad_left(&fmt_cents(*amount), 12));
+            out.push('\n');
+        }
+        if ctx.troco_cents > 0 {
+            out.push_str(&pad_right("Troco", WIDTH - 12));
+            out.push_str(&pad_left(&fmt_cents(ctx.troco_cents), 12));
             out.push('\n');
         }
     }

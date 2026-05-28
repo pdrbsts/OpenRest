@@ -4,15 +4,23 @@ import {
   api,
   Article,
   CatalogResponse,
+  Customer,
+  DocumentDetail,
   DocumentResponse,
+  Employee,
   Family,
   Local,
+  PaymentLineInput,
   PaymentMethod,
   Table,
+  TipoPreco,
+  pvpFor,
 } from "./api";
+import { ClientesView } from "./ClientesView";
 import { ConfigView } from "./ConfigView";
+import { CustomerPicker, DespachoView } from "./DeliveryView";
 
-type View = "tables" | "order" | "config";
+type View = "tables" | "order" | "config" | "despacho" | "clientes";
 
 const fmtMoney = (cents: number) => (cents / 100).toFixed(2) + "€";
 
@@ -40,6 +48,7 @@ function familySubtree(families: Family[], rootId: string): Set<string> {
 
 function App() {
   const [catalog] = createResource<CatalogResponse>(() => api.catalog());
+  const [currentDay] = createResource(() => api.currentDay());
   const [locais, { refetch: refetchLocais }] = createResource<Local[]>(() =>
     api.locais()
   );
@@ -60,8 +69,22 @@ function App() {
     return local ? all.filter((t) => t.local_id === local) : all;
   });
   const [paymentMethods] = createResource<PaymentMethod[]>(() => api.paymentMethods());
+  const [employees] = createResource<Employee[]>(() => api.employees());
+  const [tiposPreco] = createResource<TipoPreco[]>(() => api.tiposPreco());
+
+  const currentTipoPrecoCodigo = (): number | null => {
+    const local = locais()?.find((l) => l.id === selectedLocal());
+    if (!local || !local.tipo_preco_id) return null;
+    const tp = tiposPreco()?.find((t) => t.id === local.tipo_preco_id);
+    return tp?.codigo ?? null;
+  };
 
   const [view, setView] = createSignal<View>("tables");
+  const [showCustomerPicker, setShowCustomerPicker] = createSignal(false);
+
+  const currentLocal = createMemo(() =>
+    (locais() ?? []).find((l) => l.id === selectedLocal())
+  );
   const [activeTable, setActiveTable] = createSignal<Table | null>(null);
   const [doc, setDoc] = createSignal<DocumentResponse | null>(null);
   const [familyPath, setFamilyPath] = createSignal<string[]>([]);
@@ -90,6 +113,58 @@ function App() {
   });
 
   const articleById = (id: string) => articles().find((a) => a.id === id);
+
+  const startDelivery = async (customer: Customer | null, observacoes: string) => {
+    const local = currentLocal();
+    if (!local) return;
+    setError(null);
+    setReceipt(null);
+    setBusy(true);
+    try {
+      const d = await api.startLocalDocument(local.id, {
+        customer_id: customer?.id ?? null,
+        observacoes_pedido: observacoes || null,
+      });
+      setActiveTable({
+        id: d.document.id,
+        local_id: local.id,
+        code: 0,
+        name: customer ? `Delivery — ${customer.nome}` : "Delivery",
+      } as Table);
+      setDoc(d);
+      setShowCustomerPicker(false);
+      setView("order");
+      await refetchTables();
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startConsumo = async (employee: Employee) => {
+    const local = currentLocal();
+    if (!local) return;
+    setError(null);
+    setReceipt(null);
+    setBusy(true);
+    try {
+      const d = await api.openConsumo(local.id, employee.id);
+      setActiveTable({
+        id: d.document.table_id!,
+        local_id: local.id,
+        code: 9000 + employee.code,
+        name: `Consumo — ${employee.name}`,
+      } as Table);
+      setDoc(d);
+      setView("order");
+      await refetchTables();
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const openTable = async (t: Table) => {
     setError(null);
@@ -131,6 +206,91 @@ function App() {
     }
   };
 
+  const [anularLineId, setAnularLineId] = createSignal<string | null>(null);
+
+  const cancelLine = async (lineId: string) => {
+    const d = doc();
+    if (!d) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const updated = await api.cancelLine(d.document.id, lineId, {
+        employee_id: d.document.employee_id,
+      });
+      setDoc(updated);
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const anularLine = async (
+    lineId: string,
+    com_desperdicio: boolean,
+    motivo: string
+  ) => {
+    const d = doc();
+    if (!d) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const updated = await api.anularLine(d.document.id, lineId, {
+        com_desperdicio,
+        motivo: motivo || null,
+        employee_id: d.document.employee_id,
+      });
+      setDoc(updated);
+      setAnularLineId(null);
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const [showTransferModal, setShowTransferModal] = createSignal(false);
+  const [transferSelected, setTransferSelected] = createSignal<Set<string>>(
+    new Set<string>()
+  );
+
+  const transferTo = async (targetTableId: string) => {
+    const d = doc();
+    if (!d) return;
+    const ids = Array.from(transferSelected());
+    setError(null);
+    setBusy(true);
+    try {
+      const resp = await api.transferDocument(d.document.id, {
+        target_table_id: targetTableId,
+        line_ids: ids.length > 0 ? ids : null,
+        employee_id: d.document.employee_id,
+      });
+      setDoc(resp.from_document);
+      setShowTransferModal(false);
+      setTransferSelected(new Set<string>());
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pedir = async () => {
+    const d = doc();
+    if (!d) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const updated = await api.pedirDocument(d.document.id);
+      setDoc(updated);
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const closeAndPrint = async (paymentMethodId: string | null) => {
     const d = doc();
     if (!d || d.lines.length === 0) return;
@@ -149,7 +309,25 @@ function App() {
     }
   };
 
-  const total = () => doc()?.document.total ?? 0;
+  // Fecho com N rodapés de pagamento (janela Avançada). O servidor valida
+  // soma >= total e calcula troco quando soma > total.
+  const closeMultiAndPrint = async (payments: PaymentLineInput[]) => {
+    const d = doc();
+    if (!d || d.lines.length === 0 || payments.length === 0) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const closed = await api.closeDocumentMulti(d.document.id, payments);
+      const printed = await api.printDocument(d.document.id);
+      setDoc(closed);
+      setReceipt(printed);
+      await refetchTables();
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div class="flex h-full w-full bg-zinc-900 text-white select-none">
@@ -159,12 +337,16 @@ function App() {
         canOrder={!!activeTable()}
         onOrder={() => setView("order")}
         onConfig={() => setView("config")}
+        onDespacho={() => setView("despacho")}
+        onClientes={() => setView("clientes")}
+        showDespacho={(locais() ?? []).some((l) => l.tipo === "delivery")}
       />
 
       <div class="flex-1 flex flex-col h-full bg-zinc-950">
         <TopBar
           terminal="Terminal 1"
           activeTable={activeTable()}
+          dataDia={currentDay()?.data_dia ?? null}
           onBack={view() === "order" ? backToTables : undefined}
         />
 
@@ -195,12 +377,24 @@ function App() {
             <TablesView
               locais={locais() ?? []}
               selectedLocal={selectedLocal()}
+              currentLocal={currentLocal()}
               onPickLocal={(id) => setSelectedLocal(id)}
               tables={visibleTables()}
               loading={tables.loading || locais.loading}
               busy={busy()}
+              employees={employees() ?? []}
               onPick={openTable}
+              onStartDelivery={() => setShowCustomerPicker(true)}
+              onStartConsumo={startConsumo}
             />
+          </Show>
+
+          <Show when={view() === "despacho"}>
+            <DespachoView onClose={() => setView("tables")} />
+          </Show>
+
+          <Show when={view() === "clientes"}>
+            <ClientesView />
           </Show>
 
           <Show when={view() === "order" && activeTable()}>
@@ -210,7 +404,22 @@ function App() {
               busy={busy()}
               articleById={articleById}
               paymentMethods={paymentMethods() ?? []}
+              localKind={currentLocal()?.tipo ?? "normal"}
+              onPedir={pedir}
+              onCancelLine={cancelLine}
+              onAnularLine={(id) => setAnularLineId(id)}
+              onTransfer={() => {
+                setTransferSelected(
+                  new Set<string>(
+                    (doc()?.lines ?? [])
+                      .filter((l) => !l.anulada)
+                      .map((l) => l.id)
+                  )
+                );
+                setShowTransferModal(true);
+              }}
               onClose={closeAndPrint}
+              onCloseMulti={closeMultiAndPrint}
             />
             <CatalogPane
               families={families()}
@@ -220,11 +429,232 @@ function App() {
               onBack={() => setFamilyPath((p) => p.slice(0, -1))}
               onRoot={() => setFamilyPath([])}
               articles={visibleArticles()}
+              tipoPrecoCodigo={currentTipoPrecoCodigo()}
               loading={catalog.loading}
               disabled={!doc() || doc()?.document.is_closed || busy()}
               onPick={addToOrder}
             />
           </Show>
+        </div>
+      </div>
+
+      <Show when={showCustomerPicker()}>
+        <CustomerPicker
+          onCancel={() => setShowCustomerPicker(false)}
+          onConfirm={(c, obs) => startDelivery(c, obs)}
+        />
+      </Show>
+
+      <Show when={anularLineId()}>
+        <AnularDialog
+          articleName={
+            articleById(
+              doc()?.lines.find((l) => l.id === anularLineId())?.article_id ?? ""
+            )?.name ?? "Artigo"
+          }
+          qty={
+            doc()?.lines.find((l) => l.id === anularLineId())?.qty ?? 0
+          }
+          onCancel={() => setAnularLineId(null)}
+          onConfirm={(com_desperdicio, motivo) =>
+            anularLine(anularLineId()!, com_desperdicio, motivo)
+          }
+        />
+      </Show>
+
+      <Show when={showTransferModal() && doc()}>
+        <TransferDialog
+          lines={(doc()?.lines ?? []).filter((l) => !l.anulada)}
+          articleById={articleById}
+          tables={tables() ?? []}
+          locais={locais() ?? []}
+          currentTableId={doc()?.document.table_id ?? null}
+          currentLocalKind={currentLocal()?.tipo ?? "normal"}
+          selected={transferSelected()}
+          onToggleLine={(id) => {
+            const s = new Set<string>(transferSelected());
+            if (s.has(id)) s.delete(id);
+            else s.add(id);
+            setTransferSelected(s);
+          }}
+          onCancel={() => {
+            setShowTransferModal(false);
+            setTransferSelected(new Set<string>());
+          }}
+          onConfirm={transferTo}
+          busy={busy()}
+        />
+      </Show>
+    </div>
+  );
+}
+
+function AnularDialog(props: {
+  articleName: string;
+  qty: number;
+  onCancel: () => void;
+  onConfirm: (comDesperdicio: boolean, motivo: string) => void;
+}) {
+  const [comDesp, setComDesp] = createSignal(false);
+  const [motivo, setMotivo] = createSignal("");
+  return (
+    <div class="fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-6">
+      <div class="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-md p-6 text-zinc-100">
+        <h2 class="text-xl font-bold mb-1">Anular linha</h2>
+        <p class="text-sm text-zinc-400 mb-4">
+          {props.qty}× {props.articleName}
+        </p>
+        <label class="flex items-center gap-2 mb-3 text-sm font-medium">
+          <input
+            type="checkbox"
+            class="w-4 h-4"
+            checked={comDesp()}
+            onChange={(e) => setComDesp(e.currentTarget.checked)}
+          />
+          Com desperdício (artigo gasto, não volta ao stock)
+        </label>
+        <label class="block text-sm font-medium mb-1">Motivo (opcional)</label>
+        <textarea
+          rows={2}
+          class="w-full bg-zinc-800 rounded-md px-3 py-2 border border-zinc-700 resize-none mb-4"
+          placeholder="ex: queimada, cliente mudou de ideias…"
+          value={motivo()}
+          onInput={(e) => setMotivo(e.currentTarget.value)}
+        />
+        <div class="flex justify-end gap-2">
+          <button
+            onClick={props.onCancel}
+            class="px-4 py-2 rounded-md bg-zinc-700 hover:bg-zinc-600"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={() => props.onConfirm(comDesp(), motivo())}
+            class="px-5 py-2 rounded-md bg-red-700 hover:bg-red-600 text-white font-bold"
+          >
+            Anular
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TransferDialog(props: {
+  lines: DocumentDetail[];
+  articleById: (id: string) => Article | undefined;
+  tables: Table[];
+  locais: Local[];
+  currentTableId: string | null;
+  currentLocalKind: string;
+  selected: Set<string>;
+  onToggleLine: (id: string) => void;
+  onCancel: () => void;
+  onConfirm: (targetTableId: string) => void;
+  busy: boolean;
+}) {
+  // Locais válidos como destino: mesma tipologia operacional, exclui consumo_proprio/delivery.
+  const validKinds = ["normal", "pub", "take_away", "take_away_seguro"];
+  const localById = (id: string | null) =>
+    id ? props.locais.find((l) => l.id === id) : undefined;
+  const targets = () =>
+    props.tables.filter((t) => {
+      if (t.id === props.currentTableId) return false;
+      const loc = localById(t.local_id);
+      if (!loc) return false;
+      return validKinds.includes(loc.tipo);
+    });
+  const [target, setTarget] = createSignal<string | null>(null);
+
+  return (
+    <div class="fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-6">
+      <div class="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-3xl p-6 text-zinc-100 flex flex-col max-h-[85vh]">
+        <h2 class="text-xl font-bold mb-1">Transferir linhas</h2>
+        <p class="text-sm text-zinc-400 mb-4">
+          Escolhe as linhas (todas seleccionadas por defeito) e a mesa destino.
+        </p>
+
+        <div class="grid grid-cols-2 gap-4 flex-1 min-h-0">
+          <div class="flex flex-col min-h-0">
+            <h3 class="text-sm font-semibold text-zinc-300 mb-2">
+              Linhas ({props.selected.size} de {props.lines.length})
+            </h3>
+            <div class="overflow-y-auto flex-1 bg-zinc-950/50 rounded-md border border-zinc-800 p-2 space-y-1">
+              <For each={props.lines}>
+                {(line) => {
+                  const checked = () => props.selected.has(line.id);
+                  return (
+                    <label
+                      class={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer text-sm ${
+                        checked() ? "bg-indigo-900/40" : "hover:bg-zinc-800"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        class="w-4 h-4"
+                        checked={checked()}
+                        onChange={() => props.onToggleLine(line.id)}
+                      />
+                      <span class="font-bold text-blue-400 w-8">
+                        {line.qty}x
+                      </span>
+                      <span class="truncate flex-1">
+                        {props.articleById(line.article_id)?.name ?? "Artigo"}
+                      </span>
+                      <span class="text-zinc-400 font-mono text-xs">
+                        {fmtMoney(line.total)}
+                      </span>
+                    </label>
+                  );
+                }}
+              </For>
+            </div>
+          </div>
+
+          <div class="flex flex-col min-h-0">
+            <h3 class="text-sm font-semibold text-zinc-300 mb-2">
+              Mesa destino
+            </h3>
+            <div class="overflow-y-auto flex-1 bg-zinc-950/50 rounded-md border border-zinc-800 p-2 grid grid-cols-3 gap-2 content-start">
+              <For each={targets()}>
+                {(t) => {
+                  const loc = localById(t.local_id);
+                  const label = t.name ?? `${loc?.nome_generico_mesa ?? "Mesa"} ${t.code}`;
+                  return (
+                    <button
+                      onClick={() => setTarget(t.id)}
+                      class={`px-2 py-3 rounded-md text-sm font-semibold border ${
+                        target() === t.id
+                          ? "bg-indigo-600 border-indigo-400 text-white"
+                          : "bg-zinc-800 border-zinc-700 hover:bg-zinc-700 text-zinc-200"
+                      }`}
+                    >
+                      <div class="text-xs text-zinc-400 truncate">
+                        {loc?.designacao}
+                      </div>
+                      <div>{label}</div>
+                    </button>
+                  );
+                }}
+              </For>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-2 mt-4">
+          <button
+            onClick={props.onCancel}
+            class="px-4 py-2 rounded-md bg-zinc-700 hover:bg-zinc-600"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={() => target() && props.onConfirm(target()!)}
+            disabled={!target() || props.selected.size === 0 || props.busy}
+            class="px-5 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white font-bold disabled:opacity-40"
+          >
+            Transferir
+          </button>
         </div>
       </div>
     </div>
@@ -237,6 +667,9 @@ function Sidebar(props: {
   onTables: () => void;
   onOrder: () => void;
   onConfig: () => void;
+  onDespacho: () => void;
+  onClientes: () => void;
+  showDespacho: boolean;
 }) {
   const active = "bg-blue-600 hover:bg-blue-500 text-white";
   const inactive = "bg-zinc-700 hover:bg-zinc-600 text-zinc-300";
@@ -259,7 +692,25 @@ function Sidebar(props: {
       >
         Pedido
       </button>
+      <Show when={props.showDespacho}>
+        <button
+          onClick={props.onDespacho}
+          class={`w-16 h-16 rounded-xl transition-colors shadow-lg flex items-center justify-center font-semibold text-sm ${
+            props.view === "despacho" ? active : inactive
+          }`}
+        >
+          Despacho
+        </button>
+      </Show>
       <div class="flex-1" />
+      <button
+        onClick={props.onClientes}
+        class={`w-16 h-16 rounded-xl transition-colors shadow-lg flex items-center justify-center font-semibold text-sm ${
+          props.view === "clientes" ? active : inactive
+        }`}
+      >
+        Clientes
+      </button>
       <button
         onClick={props.onConfig}
         class={`w-16 h-16 rounded-xl transition-colors shadow-lg flex items-center justify-center font-semibold text-sm ${
@@ -275,8 +726,12 @@ function Sidebar(props: {
 function TopBar(props: {
   terminal: string;
   activeTable: Table | null;
+  dataDia: string | null;
   onBack?: () => void;
 }) {
+  const civilDate = () => new Date().toLocaleDateString();
+  const dataDiaShifted = () =>
+    props.dataDia && props.dataDia !== new Date().toISOString().slice(0, 10);
   return (
     <div class="h-12 bg-zinc-800 border-b border-zinc-700 flex items-center justify-between px-4">
       <div class="flex items-center gap-3">
@@ -296,9 +751,21 @@ function TopBar(props: {
           {props.terminal}
         </span>
       </div>
-      <span class="text-zinc-400 font-mono text-sm">
-        {new Date().toLocaleDateString()}
-      </span>
+      <div class="flex items-center gap-3 font-mono text-sm">
+        <Show when={props.dataDia}>
+          <span
+            class={`px-2 py-0.5 rounded ${
+              dataDiaShifted()
+                ? "bg-amber-900/40 text-amber-200 border border-amber-700/50"
+                : "text-zinc-400"
+            }`}
+            title="Dia operacional (data lógica de caixa)"
+          >
+            Dia {props.dataDia}
+          </span>
+        </Show>
+        <span class="text-zinc-500">{civilDate()}</span>
+      </div>
     </div>
   );
 }
@@ -306,11 +773,15 @@ function TopBar(props: {
 function TablesView(props: {
   locais: Local[];
   selectedLocal: string | null;
+  currentLocal: Local | undefined;
   onPickLocal: (id: string) => void;
   tables: Table[];
   loading: boolean;
   busy: boolean;
+  employees: Employee[];
   onPick: (t: Table) => void;
+  onStartDelivery: () => void;
+  onStartConsumo: (employee: Employee) => void;
 }) {
   const stateColors: Record<string, string> = {
     livre: "bg-zinc-800 border-zinc-700 hover:border-blue-500 hover:bg-zinc-700",
@@ -348,38 +819,79 @@ function TablesView(props: {
         </For>
       </div>
       <div class="flex-1 p-6 overflow-y-auto">
-        <h2 class="text-xl font-bold text-zinc-200 mb-4">Escolher mesa</h2>
         <Show when={!props.loading} fallback={<div class="text-zinc-400">A carregar…</div>}>
-          <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-4">
-            <For each={props.tables}>
-              {(t) => {
-                const estado = t.estado.estado;
-                return (
-                  <button
-                    onClick={() => props.onPick(t)}
-                    disabled={props.busy || estado === "bloqueada"}
-                    class={`aspect-square rounded-2xl border p-4 flex flex-col justify-between items-start text-left shadow-md transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none ${
-                      stateColors[estado] ?? stateColors.livre
-                    }`}
-                  >
-                    <span class="text-2xl font-bold text-zinc-100 leading-tight">
-                      {t.name ?? `Mesa ${t.code}`}
-                    </span>
-                    <div class="w-full flex justify-between items-baseline">
-                      <span class="text-xs font-mono uppercase tracking-wider text-zinc-300">
-                        {stateLabel[estado] ?? estado}
-                      </span>
-                      <Show when={t.estado.subtotal_actual > 0}>
-                        <span class="text-xs font-mono text-zinc-200">
-                          {fmtMoney(t.estado.subtotal_actual)}
+          <Show
+            when={props.currentLocal?.tipo === "delivery"}
+            fallback={
+              <Show when={props.currentLocal?.tipo === "consumo_proprio"} fallback={
+                <>
+                  <h2 class="text-xl font-bold text-zinc-200 mb-4">Escolher mesa</h2>
+                  <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-4">
+                    <For each={props.tables}>
+                      {(t) => {
+                        const estado = t.estado.estado;
+                        return (
+                          <button
+                            onClick={() => props.onPick(t)}
+                            disabled={props.busy || estado === "bloqueada"}
+                            class={`aspect-square rounded-2xl border p-4 flex flex-col justify-between items-start text-left shadow-md transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none ${
+                              stateColors[estado] ?? stateColors.livre
+                            }`}
+                          >
+                            <span class="text-2xl font-bold text-zinc-100 leading-tight">
+                              {t.name ?? `Mesa ${t.code}`}
+                            </span>
+                            <div class="w-full flex justify-between items-baseline">
+                              <span class="text-xs font-mono uppercase tracking-wider text-zinc-300">
+                                {stateLabel[estado] ?? estado}
+                              </span>
+                              <Show when={t.estado.subtotal_actual > 0}>
+                                <span class="text-xs font-mono text-zinc-200">
+                                  {fmtMoney(t.estado.subtotal_actual)}
+                                </span>
+                              </Show>
+                            </div>
+                          </button>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </>
+              }>
+                <h2 class="text-xl font-bold text-zinc-200 mb-4">Consumo Próprio — escolher empregado</h2>
+                <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                  <For each={props.employees}>
+                    {(emp) => (
+                      <button
+                        onClick={() => props.onStartConsumo(emp)}
+                        disabled={props.busy}
+                        class="aspect-square rounded-2xl bg-purple-900/30 border border-purple-600 hover:bg-purple-800/50 p-4 flex flex-col justify-between items-start text-left shadow-md disabled:opacity-50"
+                      >
+                        <span class="text-xl font-bold">{emp.name}</span>
+                        <span class="text-xs font-mono text-purple-300">
+                          paga {emp.perc_consumo / 100}% PVP
                         </span>
-                      </Show>
-                    </div>
-                  </button>
-                );
-              }}
-            </For>
-          </div>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            }
+          >
+            <div class="space-y-4">
+              <h2 class="text-xl font-bold text-zinc-200">Delivery</h2>
+              <button
+                onClick={props.onStartDelivery}
+                disabled={props.busy}
+                class="px-6 py-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-lg font-bold shadow-lg disabled:opacity-50"
+              >
+                + Novo pedido (identificar cliente)
+              </button>
+              <p class="text-sm text-zinc-400">
+                Usa o botão Despacho na sidebar para gerir os pedidos pendentes.
+              </p>
+            </div>
+          </Show>
         </Show>
       </div>
     </div>
@@ -392,9 +904,25 @@ function OrderColumn(props: {
   busy: boolean;
   articleById: (id: string) => Article | undefined;
   paymentMethods: PaymentMethod[];
+  localKind: string;
+  onPedir: () => void;
+  onCancelLine: (lineId: string) => void;
+  onAnularLine: (lineId: string) => void;
+  onTransfer: () => void;
   onClose: (paymentMethodId: string | null) => void;
+  onCloseMulti: (payments: PaymentLineInput[]) => void;
 }) {
   const [selectedMethod, setSelectedMethod] = createSignal<string | "">("");
+  const [receivedCents, setReceivedCents] = createSignal<number>(0);
+  const [showAdvanced, setShowAdvanced] = createSignal(false);
+  const total = () => props.doc?.document.total ?? 0;
+  const change = () => Math.max(0, receivedCents() - total());
+  const remaining = () => Math.max(0, total() - receivedCents());
+
+  const quickCents = [500, 1000, 2000, 5000];
+  const addReceived = (cents: number) => setReceivedCents((r) => r + cents);
+  const setExact = () => setReceivedCents(total());
+
   return (
     <div class="w-80 bg-zinc-900 border-r border-zinc-700 flex flex-col relative">
       <div class="p-4 border-b border-zinc-800 bg-zinc-900 sticky top-0">
@@ -413,21 +941,83 @@ function OrderColumn(props: {
           }
         >
           <For each={props.doc?.lines ?? []}>
-            {(line) => (
-              <div class="flex justify-between items-center py-2 px-3 bg-zinc-800/50 rounded-lg">
-                <div class="flex items-center gap-3 min-w-0">
-                  <span class="text-sm font-bold w-6 text-center text-blue-400 shrink-0">
-                    {line.qty}x
-                  </span>
-                  <span class="text-sm text-zinc-200 truncate">
-                    {props.articleById(line.article_id)?.name ?? "Artigo"}
-                  </span>
+            {(line) => {
+              const pending = line.pedida_em === null;
+              const anulada = line.anulada;
+              const bg = anulada
+                ? "bg-red-950/30 border border-red-900/50"
+                : pending
+                  ? "bg-amber-900/30 border border-amber-700/50"
+                  : "bg-zinc-800/50";
+              return (
+                <div class={`py-2 px-3 rounded-lg ${bg}`}>
+                  <div class="flex justify-between items-center">
+                    <div class="flex items-center gap-3 min-w-0">
+                      <span
+                        class={`text-sm font-bold w-6 text-center shrink-0 ${
+                          anulada ? "text-red-400 line-through" : "text-blue-400"
+                        }`}
+                      >
+                        {line.qty}x
+                      </span>
+                      <span
+                        class={`text-sm truncate ${
+                          anulada ? "text-zinc-500 line-through" : "text-zinc-200"
+                        }`}
+                      >
+                        {props.articleById(line.article_id)?.name ?? "Artigo"}
+                      </span>
+                      <Show when={pending && !anulada}>
+                        <span class="text-[10px] uppercase tracking-wider text-amber-300 font-bold">
+                          novo
+                        </span>
+                      </Show>
+                      <Show when={anulada}>
+                        <span class="text-[10px] uppercase tracking-wider text-red-300 font-bold">
+                          anulada{line.anulada_com_desperdicio ? " (desp.)" : ""}
+                        </span>
+                      </Show>
+                    </div>
+                    <span
+                      class={`text-sm font-mono ${
+                        anulada ? "text-zinc-500 line-through" : "text-zinc-300"
+                      }`}
+                    >
+                      {fmtMoney(line.total)}
+                    </span>
+                  </div>
+                  <Show when={!anulada && !props.doc?.document.is_closed}>
+                    <div class="flex gap-2 mt-1 ml-9">
+                      <Show
+                        when={pending}
+                        fallback={
+                          <button
+                            onClick={() => props.onAnularLine(line.id)}
+                            disabled={props.busy}
+                            class="text-[10px] uppercase font-bold px-2 py-0.5 rounded-md bg-red-800 hover:bg-red-700 text-white disabled:opacity-40"
+                          >
+                            Anular
+                          </button>
+                        }
+                      >
+                        <button
+                          onClick={() => props.onCancelLine(line.id)}
+                          disabled={props.busy}
+                          class="text-[10px] uppercase font-bold px-2 py-0.5 rounded-md bg-zinc-700 hover:bg-zinc-600 text-zinc-200 disabled:opacity-40"
+                        >
+                          Cancelar
+                        </button>
+                      </Show>
+                    </div>
+                  </Show>
+                  <Show when={anulada && line.anulada_motivo}>
+                    <div class="text-xs text-zinc-500 ml-9 italic">
+                      Motivo: {line.anulada_motivo}
+                    </div>
+                  </Show>
                 </div>
-                <span class="text-sm font-mono text-zinc-300">
-                  {fmtMoney(line.total)}
-                </span>
-              </div>
-            )}
+              );
+            }}
           </For>
         </Show>
 
@@ -439,12 +1029,92 @@ function OrderColumn(props: {
       </div>
 
       <div class="p-4 bg-zinc-800 border-t border-zinc-700 mt-auto">
-        <div class="flex justify-between items-end mb-4">
+        <div class="flex justify-between items-end mb-3">
           <span class="text-zinc-400 font-medium">Total</span>
           <span class="text-3xl font-bold tracking-tight text-white font-mono">
-            {fmtMoney(props.doc?.document.total ?? 0)}
+            {fmtMoney(total())}
           </span>
         </div>
+
+        <Show when={props.localKind === "take_away"}>
+          <div class="mb-3 grid grid-cols-3 gap-2">
+            <For each={quickCents}>
+              {(c) => (
+                <button
+                  onClick={() => addReceived(c)}
+                  disabled={props.doc?.document.is_closed || props.busy}
+                  class="px-2 py-2 rounded-lg text-sm font-bold bg-amber-700 hover:bg-amber-600 text-white disabled:opacity-50"
+                >
+                  + {fmtMoney(c)}
+                </button>
+              )}
+            </For>
+            <button
+              onClick={setExact}
+              class="px-2 py-2 rounded-lg text-sm font-bold bg-amber-900 hover:bg-amber-800 text-white"
+            >
+              Exacto
+            </button>
+            <button
+              onClick={() => setReceivedCents(0)}
+              class="px-2 py-2 rounded-lg text-sm bg-zinc-700 hover:bg-zinc-600 text-zinc-200"
+            >
+              Limpar
+            </button>
+          </div>
+          <div class="mb-3 text-sm font-mono bg-zinc-900 rounded-md p-2 space-y-1">
+            <div class="flex justify-between">
+              <span class="text-zinc-400">Recebido</span>
+              <span class="text-zinc-100">{fmtMoney(receivedCents())}</span>
+            </div>
+            <Show when={remaining() > 0}>
+              <div class="flex justify-between text-amber-300">
+                <span>Em Falta</span>
+                <span>{fmtMoney(remaining())}</span>
+              </div>
+            </Show>
+            <Show when={change() > 0}>
+              <div class="flex justify-between text-emerald-300 font-bold">
+                <span>Troco</span>
+                <span>{fmtMoney(change())}</span>
+              </div>
+            </Show>
+          </div>
+        </Show>
+
+        <button
+          onClick={props.onPedir}
+          disabled={
+            !props.doc ||
+            props.doc.document.is_closed ||
+            !(props.doc.lines ?? []).some((l) => l.pedida_em === null) ||
+            props.busy
+          }
+          class="w-full mb-2 py-2 rounded-lg font-bold text-sm bg-amber-600 hover:bg-amber-500 text-white shadow disabled:opacity-50 disabled:pointer-events-none"
+        >
+          PEDIR (imprime cozinha/bar)
+        </button>
+
+        <Show
+          when={
+            (props.localKind === "normal" || props.localKind === "pub") &&
+            props.doc?.document.table_id &&
+            !props.doc?.document.is_closed
+          }
+        >
+          <button
+            onClick={props.onTransfer}
+            disabled={
+              !props.doc ||
+              (props.doc.lines ?? []).filter((l) => !l.anulada).length === 0 ||
+              props.busy
+            }
+            class="w-full mb-3 py-2 rounded-lg font-bold text-sm bg-indigo-700 hover:bg-indigo-600 text-white shadow disabled:opacity-50 disabled:pointer-events-none"
+          >
+            TRANSFERIR
+          </button>
+        </Show>
+
         <div class="grid grid-cols-2 gap-2 mb-3">
           <For each={props.paymentMethods}>
             {(pm) => (
@@ -474,8 +1144,283 @@ function OrderColumn(props: {
           class="w-full py-4 rounded-xl font-bold text-lg transition-colors shadow-lg active:scale-[0.98]
                  bg-emerald-500 hover:bg-emerald-400 text-zinc-950 disabled:opacity-50 disabled:pointer-events-none"
         >
-          {props.doc?.document.is_closed ? "FECHADA" : "FECHAR & IMPRIMIR"}
+          {props.doc?.document.is_closed
+            ? "FECHADA"
+            : props.localKind === "take_away"
+              ? "COBRAR & IMPRIMIR"
+              : "FECHAR & IMPRIMIR"}
         </button>
+
+        <button
+          onClick={() => setShowAdvanced(true)}
+          disabled={
+            !props.doc ||
+            props.doc.document.is_closed ||
+            props.doc.lines.length === 0 ||
+            props.busy
+          }
+          class="w-full mt-2 py-2 rounded-lg font-semibold text-sm bg-zinc-700 hover:bg-zinc-600 text-zinc-100 disabled:opacity-50 disabled:pointer-events-none"
+        >
+          Avançado (múltiplos métodos)
+        </button>
+      </div>
+
+      <Show when={showAdvanced() && props.doc && !props.doc.document.is_closed}>
+        <AdvancedPaymentModal
+          total={total()}
+          paymentMethods={props.paymentMethods}
+          busy={props.busy}
+          onCancel={() => setShowAdvanced(false)}
+          onConfirm={(payments) => {
+            setShowAdvanced(false);
+            props.onCloseMulti(payments);
+          }}
+        />
+      </Show>
+    </div>
+  );
+}
+
+type AdvancedRow = {
+  payment_method_id: string;
+  amount: number; // cêntimos
+  descricao: string;
+};
+
+function AdvancedPaymentModal(props: {
+  total: number;
+  paymentMethods: PaymentMethod[];
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (payments: PaymentLineInput[]) => void;
+}) {
+  // Linha inicial: nenhum método pré-seleccionado, valor = total (atalho 1-método).
+  const [rows, setRows] = createSignal<AdvancedRow[]>([
+    { payment_method_id: "", amount: props.total, descricao: "" },
+  ]);
+  const [amountInput, setAmountInput] = createSignal<string>(
+    (props.total / 100).toFixed(2)
+  );
+  const [descInput, setDescInput] = createSignal<string>("");
+
+  const sumCents = () =>
+    rows().reduce(
+      (s, r) => (r.payment_method_id ? s + Math.max(0, r.amount) : s),
+      0
+    );
+  const remaining = () => Math.max(0, props.total - sumCents());
+  const change = () => Math.max(0, sumCents() - props.total);
+  const canConfirm = () =>
+    sumCents() >= props.total &&
+    rows().some((r) => r.payment_method_id && r.amount > 0);
+
+  // Atribui o método à 1ª linha sem método, ou cria uma nova com o valor em
+  // falta. Permite o fluxo do spec §8.2: "introduzir valor → premir método 1
+  // → introduzir resto → premir método 2".
+  const applyMethod = (methodId: string) => {
+    const valueCents = Math.round(parseFloat(amountInput() || "0") * 100);
+    if (!Number.isFinite(valueCents) || valueCents <= 0) return;
+    const desc = descInput().trim();
+    setRows((curr) => {
+      const idx = curr.findIndex((r) => !r.payment_method_id);
+      if (idx >= 0) {
+        const next = curr.slice();
+        next[idx] = {
+          payment_method_id: methodId,
+          amount: valueCents,
+          descricao: desc,
+        };
+        return next;
+      }
+      return [
+        ...curr,
+        { payment_method_id: methodId, amount: valueCents, descricao: desc },
+      ];
+    });
+    // Pré-preenche próxima linha com o valor em falta.
+    const next = Math.max(0, props.total - (sumCents() + valueCents));
+    setAmountInput((next / 100).toFixed(2));
+    setDescInput("");
+    setRows((curr) => {
+      if (curr.every((r) => r.payment_method_id)) {
+        return [
+          ...curr,
+          { payment_method_id: "", amount: next, descricao: "" },
+        ];
+      }
+      return curr;
+    });
+  };
+
+  const removeRow = (idx: number) =>
+    setRows((curr) => curr.filter((_, i) => i !== idx));
+
+  const methodName = (id: string) =>
+    props.paymentMethods.find((m) => m.id === id)?.name ?? "?";
+
+  const submit = () => {
+    const payments: PaymentLineInput[] = rows()
+      .filter((r) => r.payment_method_id && r.amount > 0)
+      .map((r) => ({
+        payment_method_id: r.payment_method_id,
+        amount: r.amount,
+        descricao: r.descricao.trim() || null,
+      }));
+    props.onConfirm(payments);
+  };
+
+  return (
+    <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div class="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl w-full max-w-xl flex flex-col max-h-[90vh]">
+        <div class="px-5 py-4 border-b border-zinc-800 flex justify-between items-center">
+          <h2 class="text-xl font-bold text-white">Recebimento — Avançado</h2>
+          <button
+            onClick={props.onCancel}
+            class="text-zinc-400 hover:text-white text-2xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-5 space-y-4">
+          <div class="grid grid-cols-3 gap-2 text-sm font-mono">
+            <div class="bg-zinc-800 rounded-lg p-3">
+              <div class="text-zinc-400 text-xs uppercase">Total</div>
+              <div class="text-white text-lg">{fmtMoney(props.total)}</div>
+            </div>
+            <div class="bg-zinc-800 rounded-lg p-3">
+              <div class="text-zinc-400 text-xs uppercase">Recebido</div>
+              <div class="text-white text-lg">{fmtMoney(sumCents())}</div>
+            </div>
+            <div
+              class={`rounded-lg p-3 ${
+                remaining() > 0
+                  ? "bg-amber-900/40"
+                  : change() > 0
+                    ? "bg-emerald-900/40"
+                    : "bg-zinc-800"
+              }`}
+            >
+              <div class="text-zinc-300 text-xs uppercase">
+                {remaining() > 0 ? "Em Falta" : change() > 0 ? "Troco" : "OK"}
+              </div>
+              <div class="text-white text-lg">
+                {fmtMoney(remaining() > 0 ? remaining() : change())}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="text-xs uppercase text-zinc-400 mb-1">
+              Valor da próxima linha
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <input
+                type="number"
+                inputmode="decimal"
+                step="0.01"
+                min="0"
+                value={amountInput()}
+                onInput={(e) => setAmountInput(e.currentTarget.value)}
+                class="col-span-1 px-3 py-2 rounded-lg bg-zinc-800 text-white font-mono border border-zinc-700"
+              />
+              <input
+                type="text"
+                placeholder="Descrição (opcional)"
+                value={descInput()}
+                onInput={(e) => setDescInput(e.currentTarget.value)}
+                class="col-span-2 px-3 py-2 rounded-lg bg-zinc-800 text-white text-sm border border-zinc-700"
+              />
+            </div>
+          </div>
+
+          <div>
+            <div class="text-xs uppercase text-zinc-400 mb-1">
+              Aplicar método
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <For each={props.paymentMethods}>
+                {(pm) => (
+                  <button
+                    onClick={() => applyMethod(pm.id)}
+                    disabled={props.busy}
+                    class="px-3 py-2 rounded-lg text-sm font-semibold bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50"
+                  >
+                    {pm.name}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+
+          <div>
+            <div class="text-xs uppercase text-zinc-400 mb-1">
+              Rodapés aplicados
+            </div>
+            <div class="space-y-1">
+              <For
+                each={rows().filter((r) => r.payment_method_id)}
+                fallback={
+                  <div class="text-zinc-500 italic text-sm py-2">
+                    Sem rodapés. Indique valor + método.
+                  </div>
+                }
+              >
+                {(row) => (
+                  <div class="flex items-center justify-between bg-zinc-800 rounded-md px-3 py-2">
+                    <div class="flex flex-col">
+                      <span class="text-sm text-white font-semibold">
+                        {methodName(row.payment_method_id)}
+                      </span>
+                      <Show when={row.descricao}>
+                        <span class="text-xs text-zinc-400">
+                          {row.descricao}
+                        </span>
+                      </Show>
+                    </div>
+                    <div class="flex items-center gap-3">
+                      <span class="text-sm font-mono text-zinc-200">
+                        {fmtMoney(row.amount)}
+                      </span>
+                      <button
+                        onClick={() =>
+                          removeRow(
+                            rows().findIndex(
+                              (r) =>
+                                r.payment_method_id === row.payment_method_id &&
+                                r.amount === row.amount &&
+                                r.descricao === row.descricao
+                            )
+                          )
+                        }
+                        class="text-red-400 hover:text-red-300 text-lg leading-none px-2"
+                        title="Remover rodapé"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </For>
+            </div>
+          </div>
+        </div>
+
+        <div class="px-5 py-4 border-t border-zinc-800 flex gap-2 justify-end">
+          <button
+            onClick={props.onCancel}
+            class="px-4 py-2 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-100 text-sm font-semibold"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={submit}
+            disabled={!canConfirm() || props.busy}
+            class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-sm font-bold disabled:opacity-50 disabled:pointer-events-none"
+          >
+            Fechar & Imprimir
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -489,6 +1434,7 @@ function CatalogPane(props: {
   onBack: () => void;
   onRoot: () => void;
   articles: Article[];
+  tipoPrecoCodigo: number | null;
   loading: boolean;
   disabled: boolean;
   onPick: (a: Article) => void;
@@ -553,7 +1499,10 @@ function CatalogPane(props: {
                     {article.name}
                   </span>
                   <span class="text-sm font-mono text-blue-400 relative z-10">
-                    {fmtMoney(article.price)}
+                    {(() => {
+                      const p = pvpFor(article, props.tipoPrecoCodigo);
+                      return p === 0 ? "Grátis" : fmtMoney(p);
+                    })()}
                   </span>
                 </button>
               )}

@@ -94,6 +94,25 @@ pub struct AppConfig {
     pub terminal_label: String,
     pub company: CompanyConfig,
     pub signing_key: Arc<RsaPrivateKey>,
+    /// Configurável pelo cliente: regista cancelamentos numa tabela de auditoria.
+    /// Anulações são sempre registadas (spec).
+    pub registar_cancelamentos: bool,
+    /// Spec §57 "Data Lógica de Caixa": minutos desde a meia-noite a partir
+    /// dos quais já é um novo Dia de facturação. Default 0 (dia civil).
+    pub business_day_cutoff_minutes: u32,
+    /// Offset do fuso horário da loja em minutos relativos a UTC. Default 0.
+    /// Usado para converter o relógio UTC armazenado na hora local da loja
+    /// antes de aplicar o corte.
+    pub business_day_tz_offset_minutes: i32,
+}
+
+impl AppConfig {
+    /// Computa o Dia operacional para o instante UTC dado, usando o cutoff e
+    /// o offset configurados.
+    pub fn business_day(&self, now_utc: chrono::DateTime<chrono::Utc>) -> chrono::NaiveDate {
+        let local = domain::utc_to_local(now_utc, self.business_day_tz_offset_minutes);
+        domain::compute_business_day(local, self.business_day_cutoff_minutes)
+    }
 }
 
 pub struct AppState {

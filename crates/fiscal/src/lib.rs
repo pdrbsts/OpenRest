@@ -92,6 +92,60 @@ pub fn atcud(validation_code: &str, document_number: i32) -> String {
     format!("{}-{}", validation_code, document_number)
 }
 
+/// Valida o check-digit de um NIF português (9 dígitos, módulo 11).
+/// Primeiro dígito tem de pertencer ao conjunto {1,2,3,5,6,7,8,9} (singulares,
+/// colectivos, eventuais). Spec §201: a UI deve avisar mas não impedir, daí
+/// devolvermos `bool` em vez de `Result`.
+pub fn validate_nif_pt(nif: &str) -> bool {
+    let digits: Vec<u32> = nif.chars().filter_map(|c| c.to_digit(10)).collect();
+    if digits.len() != 9 {
+        return false;
+    }
+    if !matches!(digits[0], 1 | 2 | 3 | 5 | 6 | 7 | 8 | 9) {
+        return false;
+    }
+    let sum: u32 = digits[..8]
+        .iter()
+        .enumerate()
+        .map(|(i, d)| d * (9 - i as u32))
+        .sum();
+    let check = match 11 - (sum % 11) {
+        10 | 11 => 0,
+        v => v,
+    };
+    check == digits[8]
+}
+
+#[cfg(test)]
+mod nif_tests {
+    use super::*;
+
+    #[test]
+    fn known_valid_pt_nifs() {
+        // NIFs sintéticos com check-digit correcto.
+        assert!(validate_nif_pt("123456789"));
+        assert!(validate_nif_pt("500000000"));
+    }
+
+    #[test]
+    fn rejects_short_or_letters() {
+        assert!(!validate_nif_pt("12345678"));
+        assert!(!validate_nif_pt("12345678X"));
+        assert!(!validate_nif_pt(""));
+    }
+
+    #[test]
+    fn rejects_wrong_check_digit() {
+        assert!(!validate_nif_pt("123456788"));
+    }
+
+    #[test]
+    fn rejects_invalid_first_digit() {
+        // 4 não é prefixo válido em NIF singular/colectivo PT.
+        assert!(!validate_nif_pt("400000004"));
+    }
+}
+
 /// Inputs to build the QR payload required by Portaria 195/2020.
 pub struct QrInputs<'a> {
     pub emitter_nif: &'a str,
