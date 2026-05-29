@@ -142,6 +142,8 @@ pub struct AppState {
     pub event_bus: Arc<EventBus>,
     pub db: Database,
     pub config: AppConfig,
+    /// Fila de impressão assíncrona, partilhada por todos os pedidos.
+    pub spooler: devices::spooler::PrintSpooler,
 }
 
 impl AppState {
@@ -150,6 +152,7 @@ impl AppState {
             event_bus: Arc::new(EventBus::new(1024)),
             db,
             config,
+            spooler: devices::spooler::PrintSpooler::new(Default::default()),
         }
     }
 }

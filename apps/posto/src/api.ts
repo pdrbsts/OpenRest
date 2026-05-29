@@ -30,6 +30,8 @@ export interface ZonaImpressao {
   anulado_em: string | null;
 }
 
+export type ConexaoTipo = "file" | "null" | "tcp" | "serial" | "windows_spooler";
+
 export interface Dispositivo {
   id: string;
   nome: string;
@@ -39,6 +41,15 @@ export interface Dispositivo {
   output_path: string | null;
   ativo: boolean;
   anulado_em: string | null;
+  conexao_tipo: ConexaoTipo;
+  conexao_config: Record<string, unknown>;
+}
+
+export interface DispositivoStatus {
+  health: "ok" | "failed" | "unknown";
+  queued: number;
+  last_error: string | null;
+  jobs_done: number;
 }
 
 export interface PrintMapping {
@@ -376,6 +387,27 @@ export interface TransferResponse {
   from_document: DocumentResponse;
   to_document: DocumentResponse;
   transferencias: Transferencia[];
+}
+
+export interface DocumentTemplate {
+  id: string;
+  tipo_documento: string;
+  designacao: string;
+  cabecalho: string;
+  linha_detalhe: string;
+  rodape: string;
+  nao_imprime_detalhes: boolean;
+  largura: number;
+  anulado_em: string | null;
+}
+
+export interface DocumentTemplateInput {
+  designacao: string;
+  cabecalho: string;
+  linha_detalhe: string;
+  rodape: string;
+  nao_imprime_detalhes: boolean;
+  largura: number;
 }
 
 const BASE = "http://localhost:3000";
@@ -768,14 +800,40 @@ export const api = {
     }),
 
   dispositivos: () => jsonReq<Dispositivo[]>("/api/dispositivos"),
-  createDispositivo: (body: { nome: string; tipo?: string; output_path?: string | null }) =>
+  createDispositivo: (body: {
+    nome: string;
+    tipo?: string;
+    output_path?: string | null;
+    conexao_tipo?: ConexaoTipo;
+    conexao_config?: Record<string, unknown>;
+  }) =>
     jsonReq<Dispositivo>("/api/dispositivos", {
       method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateDispositivo: (
+    id: string,
+    body: Partial<{
+      nome: string;
+      tipo: string;
+      conexao_tipo: ConexaoTipo;
+      conexao_config: Record<string, unknown>;
+      ativo: boolean;
+    }>
+  ) =>
+    jsonReq<Dispositivo>(`/api/dispositivos/${id}`, {
+      method: "PUT",
       body: JSON.stringify(body),
     }),
   deleteDispositivo: (id: string) =>
     fetch(`${BASE}/api/dispositivos/${id}`, { method: "DELETE" }).then((r) => {
       if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+    }),
+  dispositivoStatus: (id: string) =>
+    jsonReq<DispositivoStatus>(`/api/dispositivos/${id}/status`),
+  testDispositivo: (id: string) =>
+    fetch(`${BASE}/api/dispositivos/${id}/test`, { method: "POST" }).then((r) => {
+      if (!r.ok) throw new Error(`test failed: ${r.status}`);
     }),
 
   printMappings: () => jsonReq<PrintMapping[]>("/api/print-mappings"),
@@ -793,5 +851,15 @@ export const api = {
   deletePrintMapping: (id: string) =>
     fetch(`${BASE}/api/print-mappings/${id}`, { method: "DELETE" }).then((r) => {
       if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+    }),
+
+  documentTemplates: () =>
+    jsonReq<DocumentTemplate[]>("/api/document-templates"),
+  documentTemplate: (tipo: string) =>
+    jsonReq<DocumentTemplate>(`/api/document-templates/${tipo}`),
+  updateDocumentTemplate: (tipo: string, body: DocumentTemplateInput) =>
+    jsonReq<DocumentTemplate>(`/api/document-templates/${tipo}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
     }),
 };

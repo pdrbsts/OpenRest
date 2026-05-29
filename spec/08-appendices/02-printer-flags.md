@@ -2,6 +2,8 @@
 
 > Referência completa das sequências especiais (flags) usadas em templates de documentos. Substituídas no momento da impressão pelos valores correntes.
 
+> **Estado de implementação (Fase 2)**: o motor de renderização está implementado em `crates/devices/src/template.rs` e os templates por tipo de documento são configuráveis (tabela `documento_templates`, editáveis em *Documentos* no posto). A flag `\nx` está listada em duas secções na origem (cliente-ou-associação **e** Série/Número); o OpenRest resolve `\nx` como o **identificador composto Série/Número** do documento. As flags de estilo `\s0`..`\s6` (vermelho, tamanho duplo, sublinhado) são reconhecidas mas, no modo impressora genérica (texto), não têm efeito visível — só as de alinhamento (`\s7`/`\s8`/`\s9`) actuam.
+
 ## Casa / Estabelecimento
 
 | Flag | Conteúdo | Origem |

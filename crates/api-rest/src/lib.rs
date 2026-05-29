@@ -7,16 +7,16 @@ use axum::{
 };
 use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
-use server::{AppState, CompanyConfig, SystemEvent};
+use server::{AppState, SystemEvent};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 use domain::{
     Anulacao, Article, Atcud, Cancelamento, Customer, DeliveryEstado, Dispositivo, Document,
-    DocumentDetail, DocumentSeries, Employee, Entregador, Family, ImpressoraZonaLocal, Local,
-    MesaEstado, Payment, PaymentMethod, PedidoDelivery, SessaoEmpregado, Table, TipoPreco,
-    Transferencia, Zona, ZonaImpressao,
+    DocumentDetail, DocumentSeries, DocumentTemplate, Employee, Entregador, Family,
+    ImpressoraZonaLocal, Local, MesaEstado, Payment, PaymentMethod, PedidoDelivery, SessaoEmpregado,
+    Table, TipoPreco, Transferencia, Zona, ZonaImpressao,
 };
 
 mod at_series;
@@ -114,6 +114,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             put(update_zona_impressao).delete(delete_zona_impressao),
         )
         .route("/api/dispositivos", get(get_dispositivos).post(create_dispositivo))
+        .route("/api/dispositivos/:id/status", get(get_dispositivo_status))
+        .route("/api/dispositivos/:id/test", post(test_dispositivo))
         .route(
             "/api/dispositivos/:id",
             put(update_dispositivo).delete(delete_dispositivo),
@@ -140,6 +142,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/documents/:id/split", post(split_document_handler))
         .route("/api/documents/:id/split/auto-plan", get(auto_split_plan))
         .route("/api/documents/:id/print", post(print_document))
+        .route("/api/document-templates", get(get_document_templates))
+        .route(
+            "/api/document-templates/:tipo",
+            get(get_document_template_handler).put(update_document_template_handler),
+        )
         .route("/api/at-series/registar", post(at_series::registar))
         .route("/api/at-series/consultar", post(at_series::consultar))
         .route("/api/at-series/finalizar", post(at_series::finalizar))
@@ -868,13 +875,7 @@ async fn anular_line(
                 req.com_desperdicio,
                 req.motivo.as_deref(),
             );
-            if let Some(path) = &dispositivo.output_path {
-                let printer = devices::GenericPrinter::new(std::path::PathBuf::from(path));
-                printer
-                    .print_receipt(&ticket)
-                    .await
-                    .map_err(|e| ApiError::Internal(e.to_string()))?;
-            }
+            enqueue_ticket(&state, &dispositivo, &ticket).await;
         }
     }
 
@@ -1772,10 +1773,18 @@ pub struct CreateDispositivoRequest {
     pub modelo: Option<String>,
     pub descricao: Option<String>,
     pub output_path: Option<String>,
+    #[serde(default = "default_conexao_tipo")]
+    pub conexao_tipo: String,
+    #[serde(default)]
+    pub conexao_config: serde_json::Value,
 }
 
 fn default_tipo_disp() -> String {
     "impressora_generica".into()
+}
+
+fn default_conexao_tipo() -> String {
+    "file".into()
 }
 
 async fn create_dispositivo(
@@ -1790,6 +1799,8 @@ async fn create_dispositivo(
             modelo: req.modelo,
             descricao: req.descricao,
             output_path: req.output_path,
+            conexao_tipo: req.conexao_tipo,
+            conexao_config: req.conexao_config,
         },
     )
     .await?;
@@ -1810,6 +1821,10 @@ pub struct UpdateDispositivoRequest {
     pub output_path: OptionalField<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_field")]
     pub ativo: OptionalField<bool>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub conexao_tipo: OptionalField<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub conexao_config: OptionalField<serde_json::Value>,
 }
 
 async fn update_dispositivo(
@@ -1824,6 +1839,8 @@ async fn update_dispositivo(
         descricao: req.descricao.into_option(),
         output_path: req.output_path.into_option(),
         ativo: req.ativo.into_option(),
+        conexao_tipo: req.conexao_tipo.into_option(),
+        conexao_config: req.conexao_config.into_option(),
     };
     Ok(Json(
         storage::update_dispositivo(state.db.pool(), id, upd).await?,
@@ -1836,6 +1853,49 @@ async fn delete_dispositivo(
 ) -> ApiResult<StatusCode> {
     storage::delete_dispositivo(state.db.pool(), id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+pub struct DeviceStatusDto {
+    pub health: String,
+    pub queued: usize,
+    pub last_error: Option<String>,
+    pub jobs_done: u64,
+}
+
+async fn get_dispositivo_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<DeviceStatusDto>> {
+    use devices::spooler::DeviceHealth;
+    let s = state.spooler.status(&id.to_string()).await.unwrap_or_default();
+    let health = match s.health {
+        DeviceHealth::Ok => "ok",
+        DeviceHealth::Failed => "failed",
+        DeviceHealth::Unknown => "unknown",
+    };
+    Ok(Json(DeviceStatusDto {
+        health: health.into(),
+        queued: s.queued,
+        last_error: s.last_error,
+        jobs_done: s.jobs_done,
+    }))
+}
+
+/// Envia um talão de teste para validar a ligação do dispositivo.
+async fn test_dispositivo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    let d = storage::get_dispositivo(state.db.pool(), id).await?;
+    let ticket = format!(
+        "*** TESTE OpenRest ***\n{}\n{}\nLigacao: {}\n",
+        d.nome,
+        Utc::now().format("%Y-%m-%d %H:%M:%S"),
+        d.conexao_tipo
+    );
+    enqueue_ticket(&state, &d, &ticket).await;
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn get_print_mappings(
@@ -2008,13 +2068,7 @@ async fn pedir_document(
             &kitchen_lines,
             &cross_blocks,
         );
-        if let Some(path) = &dispositivo.output_path {
-            let printer = devices::GenericPrinter::new(std::path::PathBuf::from(path));
-            printer
-                .print_receipt(&ticket)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-        }
+        enqueue_ticket(&state, &dispositivo, &ticket).await;
         for l in ls {
             printed_line_ids.push(l.id);
         }
@@ -2030,6 +2084,41 @@ async fn pedir_document(
         .event_bus
         .publish(SystemEvent::DocumentLineAdded { document_id: document.id });
     Ok(Json(build_doc_response(pool, document).await?))
+}
+
+/// Resolve o transporte de um dispositivo a partir da sua configuração.
+fn device_connection(d: &Dispositivo) -> Result<devices::transport::Connection, ApiError> {
+    devices::transport::Connection::from_config(&d.conexao_tipo, &d.conexao_config)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))
+}
+
+/// Bytes a enviar a um dispositivo: ligações `file`/`null` recebem texto
+/// legível; as restantes recebem ESC/POS codificado (codepage + corte).
+fn bytes_for_device(d: &Dispositivo, text: &str) -> Vec<u8> {
+    match d.conexao_tipo.as_str() {
+        "file" | "null" => text.as_bytes().to_vec(),
+        _ => devices::escpos_encode::encode(
+            text,
+            &devices::escpos_encode::EscposProfile::default(),
+        ),
+    }
+}
+
+/// Coloca um talão na fila do dispositivo (não bloqueia; o spooler trata de
+/// retry e estado). Ligações inválidas são registadas, não falham o pedido.
+async fn enqueue_ticket(state: &AppState, dispositivo: &Dispositivo, ticket: &str) {
+    match device_connection(dispositivo) {
+        Ok(conn) => {
+            let bytes = bytes_for_device(dispositivo, ticket);
+            state
+                .spooler
+                .enqueue(&dispositivo.id.to_string(), conn, bytes, 1)
+                .await;
+        }
+        Err(e) => {
+            tracing::warn!("dispositivo {} sem ligação válida: {}", dispositivo.id, e);
+        }
+    }
 }
 
 async fn print_document(
@@ -2077,14 +2166,15 @@ async fn print_document(
         })
         .collect();
 
-    let vat_rows: Vec<devices::escpos::VatRow> = breakdown
-        .iter()
-        .map(|b| devices::escpos::VatRow {
-            label: format!("{:.1}%", b.rate_bp as f64 / 100.0),
-            base: b.base,
-            vat: b.vat,
-        })
-        .collect();
+    // Cliente / empregado (snapshots para as flags do cabeçalho).
+    let customer = match document.customer_id {
+        Some(cid) => storage::get_customer(pool, cid).await.ok(),
+        None => None,
+    };
+    let employee = match document.employee_id {
+        Some(eid) => storage::get_employee(pool, eid).await.ok(),
+        None => None,
+    };
 
     let qr_block = document
         .qr_payload
@@ -2092,52 +2182,38 @@ async fn print_document(
         .and_then(|p| fiscal::render_qr_ascii(p).ok())
         .unwrap_or_default();
 
-    let receipt = devices::escpos::format_legal_receipt(devices::escpos::ReceiptCtx {
-        company_legal_name: &state.config.company.legal_name,
-        company_trade_name: state.config.company.trade_name.as_deref(),
-        company_nif: &state.config.company.nif,
-        company_address: &state.config.company.address,
-        company_postal_city: &format_postal(&state.config.company),
-        company_share_capital_cents: state.config.company.share_capital_cents,
-        company_registry: state
-            .config
-            .company
-            .registry_office
-            .as_deref()
-            .zip(state.config.company.registry_number.as_deref()),
-        terminal: &state.config.terminal_label,
-        table_label: &table_label,
-        document_type_label: "Factura Simplificada",
-        document_identifier: &format!(
-            "{} {}",
-            document.document_type.as_deref().unwrap_or(""),
-            document
-                .document_number
-                .map(|n| n.to_string())
-                .unwrap_or_default()
-        ),
-        atcud: document.atcud.as_deref().unwrap_or(""),
-        hash_short: document.hash_short.as_deref().unwrap_or(""),
-        software_certificate: &state.config.company.software_certificate,
-        issued_at: document.issued_at.unwrap_or(document.created_at),
-        lines: lines
-            .iter()
-            .zip(articles.iter())
-            .map(|(l, a)| devices::escpos::ReceiptLine {
-                name: l.descricao.as_deref().unwrap_or(&a.name),
-                qty_milli: l.qty_milli,
-                unit_price: l.unit_price,
-                total: l.total,
-                vat_label: format!("{:.0}%", a.vat_rate as f64 / 100.0),
-            })
-            .collect(),
-        vat_rows,
-        total: document.total,
-        payments: payments_with_label,
-        troco_cents: document.troco_cents,
-        qr_block: &qr_block,
-        qr_payload: document.qr_payload.as_deref().unwrap_or(""),
-    });
+    // Selecciona o template configurável para o tipo de documento; cai no de
+    // factura simplificada se o tipo não tiver template próprio.
+    let tipo = template_tipo_for(document.document_type.as_deref());
+    let tpl = match storage::get_document_template(pool, tipo).await {
+        Ok(t) => t,
+        Err(storage::StorageError::NotFound) => {
+            storage::get_document_template(pool, "fatura_simplificada").await?
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let ctx = build_document_context(
+        &state.config,
+        &document,
+        &lines,
+        &articles,
+        &breakdown,
+        &payments_with_label,
+        &table_label,
+        customer.as_ref(),
+        employee.as_ref(),
+        qr_block,
+    );
+
+    let width = if tpl.largura > 0 { tpl.largura as usize } else { devices::template::DEFAULT_WIDTH };
+    let tpl_engine = devices::template::DocumentTemplate {
+        cabecalho: tpl.cabecalho,
+        linha_detalhe: tpl.linha_detalhe,
+        rodape: tpl.rodape,
+        nao_imprime_detalhes: tpl.nao_imprime_detalhes,
+    };
+    let receipt = devices::template::render_document(&tpl_engine, &ctx, width);
 
     let printer = devices::GenericPrinter::new(state.config.printer_output_path.clone());
     printer
@@ -2148,11 +2224,355 @@ async fn print_document(
     Ok((StatusCode::OK, receipt))
 }
 
-fn format_postal(company: &CompanyConfig) -> String {
-    match (company.postal_code.as_deref(), company.city.as_deref()) {
-        (Some(pc), Some(city)) => format!("{} {}", pc, city),
-        (Some(pc), None) => pc.to_string(),
-        (None, Some(city)) => city.to_string(),
-        (None, None) => String::new(),
+/// Mapeia o código de tipo de documento (série) ao `tipo_documento` do template.
+/// Documentos de venda em PT: FS (fatura simplificada), FR (fatura-recibo),
+/// FT (fatura a crédito).
+fn template_tipo_for(document_type: Option<&str>) -> &'static str {
+    match document_type {
+        Some("FT") => "fatura",
+        Some("FR") => "fatura_recibo",
+        _ => "fatura_simplificada", // FS e qualquer outro
+    }
+}
+
+/// Constrói o contexto de renderização a partir do documento fechado.
+#[allow(clippy::too_many_arguments)]
+fn build_document_context(
+    config: &server::AppConfig,
+    document: &Document,
+    lines: &[DocumentDetail],
+    articles: &[Article],
+    breakdown: &[VatBucket],
+    payments_with_label: &[(String, i64)],
+    table_label: &str,
+    customer: Option<&Customer>,
+    employee: Option<&Employee>,
+    qr_block: String,
+) -> devices::template::DocumentContext {
+    use devices::template as tpl;
+    let c = &config.company;
+    let total_sem_iva: i64 = breakdown.iter().map(|b| b.base).sum();
+    let iva_total: i64 = breakdown.iter().map(|b| b.vat).sum();
+    let pago: i64 = payments_with_label.iter().map(|(_, a)| *a).sum();
+
+    tpl::DocumentContext {
+        company: tpl::Company {
+            legal_name: c.legal_name.clone(),
+            trade_name: c.trade_name.clone(),
+            nif: c.nif.clone(),
+            address: c.address.clone(),
+            city: c.city.clone(),
+            postal_code: c.postal_code.clone(),
+            country: Some(c.country.clone()),
+            phone: None,
+            fax: None,
+            registry_office: c.registry_office.clone(),
+            registry_number: c.registry_number.clone(),
+            share_capital_cents: c.share_capital_cents,
+        },
+        client: customer.map(|cu| tpl::Party {
+            name: Some(cu.nome.clone()),
+            number: cu.codigo.map(|n| n.to_string()),
+            nif: cu.nif.clone(),
+            address: cu.morada.clone(),
+            city: cu.localidade.clone(),
+            postal_code: cu.cod_postal.clone(),
+            zone: None,
+            association_name: None,
+            association_nif: None,
+        }),
+        employee: tpl::Staff {
+            number: employee.map(|e| e.code.to_string()),
+            name: employee.map(|e| e.name.clone()),
+        },
+        table_number: document.table_id.map(|_| table_label.to_string()),
+        table_name: Some(table_label.to_string()),
+        local_name: None,
+        issued_at: Some(document.issued_at.unwrap_or(document.created_at)),
+        opened_at: Some(document.created_at),
+        now: Some(Utc::now()),
+        document_number: document.document_number.map(|n| n.to_string()),
+        series: document.document_type.clone(),
+        document_type_label: document.document_type.clone(),
+        atcud: document.atcud.clone(),
+        hash_short: document.hash_short.clone(),
+        software_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        software_certificate: Some(c.software_certificate.clone()),
+        num_people: None,
+        subtotal: document.total,
+        total: document.total,
+        total_sem_iva,
+        iva_total,
+        secondary_rate: None,
+        payments: payments_with_label
+            .iter()
+            .map(|(method, amount)| tpl::PaymentLine {
+                method: method.clone(),
+                amount: *amount,
+            })
+            .collect(),
+        troco: document.troco_cents,
+        gorjeta: 0,
+        pago,
+        a1: None,
+        a2: None,
+        a3: None,
+        lines: lines
+            .iter()
+            .zip(articles.iter())
+            .map(|(l, a)| tpl::LineContext {
+                qty_milli: l.qty_milli,
+                article_code: Some(a.code.to_string()),
+                name: l.descricao.clone().unwrap_or_else(|| a.name.clone()),
+                short_name: None,
+                unit_price: l.unit_price,
+                price_sem_iva: 0,
+                perc_desc_bp: 0,
+                val_desc: 0,
+                iva_cod: None,
+                iva_perc_bp: a.vat_rate,
+                total: l.total,
+                zona_imp: None,
+                emp_pedido: None,
+                hora: None,
+            })
+            .collect(),
+        vat_rows: breakdown
+            .iter()
+            .map(|b| tpl::VatRow {
+                label: format!("{:.1}%", b.rate_bp as f64 / 100.0),
+                base: b.base,
+                vat: b.vat,
+            })
+            .collect(),
+        qr_block,
+        qr_payload: document.qr_payload.clone().unwrap_or_default(),
+    }
+}
+
+async fn get_document_templates(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Vec<DocumentTemplate>>> {
+    Ok(Json(storage::list_document_templates(state.db.pool()).await?))
+}
+
+async fn get_document_template_handler(
+    State(state): State<Arc<AppState>>,
+    Path(tipo): Path<String>,
+) -> ApiResult<Json<DocumentTemplate>> {
+    Ok(Json(
+        storage::get_document_template(state.db.pool(), &tipo).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateDocumentTemplateRequest {
+    pub designacao: String,
+    pub cabecalho: String,
+    pub linha_detalhe: String,
+    pub rodape: String,
+    #[serde(default)]
+    pub nao_imprime_detalhes: bool,
+    #[serde(default = "default_template_width")]
+    pub largura: i32,
+}
+
+fn default_template_width() -> i32 {
+    devices::template::DEFAULT_WIDTH as i32
+}
+
+async fn update_document_template_handler(
+    State(state): State<Arc<AppState>>,
+    Path(tipo): Path<String>,
+    Json(req): Json<UpdateDocumentTemplateRequest>,
+) -> ApiResult<Json<DocumentTemplate>> {
+    let pool = state.db.pool();
+    // Reutiliza o id existente quando o template já existe (upsert por tipo).
+    let id = storage::get_document_template(pool, &tipo)
+        .await
+        .map(|t| t.id)
+        .unwrap_or_else(|_| Uuid::new_v4());
+    let tpl = DocumentTemplate {
+        id,
+        tipo_documento: tipo,
+        designacao: req.designacao,
+        cabecalho: req.cabecalho,
+        linha_detalhe: req.linha_detalhe,
+        rodape: req.rodape,
+        nao_imprime_detalhes: req.nao_imprime_detalhes,
+        largura: req.largura,
+        anulado_em: None,
+    };
+    Ok(Json(storage::upsert_document_template(pool, &tpl).await?))
+}
+
+
+#[cfg(test)]
+mod template_tests {
+    use chrono::{TimeZone, Utc};
+    use devices::template as tpl;
+    use uuid::Uuid;
+
+    async fn migrated_db() -> storage::Database {
+        let path = std::env::temp_dir().join(format!("openrest_tpl_{}.db", Uuid::new_v4()));
+        let url = format!("sqlite://{}", path.display());
+        let db = storage::Database::new(&url).await.unwrap();
+        db.migrate().await.unwrap();
+        db
+    }
+
+    fn sample_ctx() -> tpl::DocumentContext {
+        tpl::DocumentContext {
+            company: tpl::Company {
+                legal_name: "Tasca do Zé, Lda".into(),
+                trade_name: Some("Tasca do Zé".into()),
+                nif: "501234567".into(),
+                address: "Rua Direita, 10".into(),
+                city: Some("Porto".into()),
+                postal_code: Some("4000-001".into()),
+                ..Default::default()
+            },
+            total: 1130,
+            subtotal: 1130,
+            total_sem_iva: 1000,
+            iva_total: 130,
+            document_number: Some("12".into()),
+            series: Some("FS".into()),
+            atcud: Some("AT-XYZ-12".into()),
+            hash_short: Some("AB12".into()),
+            issued_at: Some(Utc.with_ymd_and_hms(2026, 5, 29, 14, 30, 0).unwrap()),
+            pago: 1130,
+            lines: vec![tpl::LineContext {
+                qty_milli: 1000,
+                name: "Café".into(),
+                unit_price: 80,
+                total: 80,
+                iva_perc_bp: 1300,
+                ..Default::default()
+            }],
+            vat_rows: vec![tpl::VatRow { label: "13%".into(), base: 1000, vat: 130 }],
+            payments: vec![tpl::PaymentLine { method: "Numerário".into(), amount: 1130 }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn seeded_fatura_simplificada_renders() {
+        let db = migrated_db().await;
+        let t = storage::get_document_template(db.pool(), "fatura_simplificada")
+            .await
+            .unwrap();
+        let engine = tpl::DocumentTemplate {
+            cabecalho: t.cabecalho,
+            linha_detalhe: t.linha_detalhe,
+            rodape: t.rodape,
+            nao_imprime_detalhes: t.nao_imprime_detalhes,
+        };
+        let out = tpl::render_document(&engine, &sample_ctx(), t.largura as usize);
+        assert!(out.contains("Tasca do Zé"), "header trade name: {out}");
+        assert!(out.contains("Factura Simplificada"), "title: {out}");
+        assert!(out.contains("FS/12"), "doc identifier: {out}");
+        assert!(out.contains("Café"), "detail line: {out}");
+        assert!(out.contains("TOTAL"), "total: {out}");
+        assert!(out.contains("ATCUD: AT-XYZ-12"), "atcud: {out}");
+        assert!(out.contains("13%"), "vat table: {out}");
+    }
+
+    #[tokio::test]
+    async fn all_default_templates_present() {
+        let db = migrated_db().await;
+        let all = storage::list_document_templates(db.pool()).await.unwrap();
+        for tipo in ["fatura_simplificada", "fatura", "fatura_recibo", "consulta_mesa", "pedido"] {
+            assert!(all.iter().any(|t| t.tipo_documento == tipo), "missing {tipo}");
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_roundtrip_keeps_id() {
+        let db = migrated_db().await;
+        let mut t = storage::get_document_template(db.pool(), "fatura")
+            .await
+            .unwrap();
+        let original_id = t.id;
+        t.cabecalho = r"\s7\no -- EDITADO".into();
+        let saved = storage::upsert_document_template(db.pool(), &t).await.unwrap();
+        assert_eq!(saved.cabecalho, r"\s7\no -- EDITADO");
+        assert_eq!(saved.id, original_id);
+        let again = storage::get_document_template(db.pool(), "fatura")
+            .await
+            .unwrap();
+        assert_eq!(again.cabecalho, r"\s7\no -- EDITADO");
+        assert_eq!(again.id, original_id);
+    }
+
+    fn ctx_with_client() -> tpl::DocumentContext {
+        let mut c = sample_ctx();
+        c.client = Some(tpl::Party {
+            name: Some("João Silva".into()),
+            number: Some("42".into()),
+            nif: Some("245678901".into()),
+            address: Some("Av. da Liberdade, 22".into()),
+            city: Some("Lisboa".into()),
+            postal_code: Some("1250-096".into()),
+            ..Default::default()
+        });
+        c
+    }
+
+    fn engine_of(t: domain::DocumentTemplate) -> tpl::DocumentTemplate {
+        tpl::DocumentTemplate {
+            cabecalho: t.cabecalho,
+            linha_detalhe: t.linha_detalhe,
+            rodape: t.rodape,
+            nao_imprime_detalhes: t.nao_imprime_detalhes,
+        }
+    }
+
+    #[tokio::test]
+    async fn fatura_renders_client_and_unit_price() {
+        let db = migrated_db().await;
+        let t = storage::get_document_template(db.pool(), "fatura")
+            .await
+            .unwrap();
+        let width = t.largura as usize;
+        let out = tpl::render_document(&engine_of(t), &ctx_with_client(), width);
+        assert!(out.contains("FACTURA  (Original)"), "title/original: {out}");
+        // Bloco de cliente nominativo.
+        assert!(out.contains("João Silva"), "client name: {out}");
+        assert!(out.contains("NIF: 245678901"), "client nif: {out}");
+        assert!(out.contains("Av. da Liberdade, 22"), "client address: {out}");
+        assert!(out.contains("1250-096 Lisboa"), "client postal/city: {out}");
+        // Cabeçalho de colunas com preço unitário e linha de detalhe alinhada.
+        assert!(out.contains("P.Unit"), "unit price header: {out}");
+        assert!(out.contains("Café"), "detail: {out}");
+        // Larguras consistentes: separadores e linhas com a largura do template.
+        for line in out.lines() {
+            assert!(line.chars().count() <= width, "linha excede largura: {line:?}");
+        }
+        assert!(out.contains("ATCUD: AT-XYZ-12"), "atcud: {out}");
+        // FT é a crédito: não exibe bloco de pagamento recebido.
+        assert!(out.contains("a crédito"), "natureza a crédito: {out}");
+        assert!(!out.contains("Total pago"), "FT não deve mostrar pagamento: {out}");
+    }
+
+    #[tokio::test]
+    async fn fatura_recibo_renders_payment_block() {
+        let db = migrated_db().await;
+        let t = storage::get_document_template(db.pool(), "fatura_recibo")
+            .await
+            .unwrap();
+        let width = t.largura as usize;
+        let mut ctx = ctx_with_client();
+        ctx.troco = 70; // 0.70
+        let out = tpl::render_document(&engine_of(t), &ctx, width);
+        assert!(out.contains("FACTURA-RECIBO"), "title: {out}");
+        // Nominativo: bloco de cliente.
+        assert!(out.contains("João Silva"), "client: {out}");
+        // Recibo: bloco de pagamento recebido.
+        assert!(out.contains("Forma de pagamento: Numerário"), "forma: {out}");
+        assert!(out.contains("Total pago: 11.30"), "pago: {out}");
+        assert!(out.contains("Troco: 0.70"), "troco: {out}");
+        assert!(out.contains("Recebi(emos)"), "quitação: {out}");
+        assert!(out.contains("13%"), "vat table: {out}");
     }
 }

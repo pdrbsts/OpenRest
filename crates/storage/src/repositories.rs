@@ -1,9 +1,10 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use domain::{
     Anulacao, Article, Atcud, Cancelamento, Customer, DeliveryEstado, Dispositivo, Document,
-    DocumentDetail, DocumentSeries, Employee, Entregador, Family, ImpressoraZonaLocal, Local,
-    LocalKind, MesaEstado, MesaEstadoKind, NivelAcesso, Payment, PaymentMethod, PedidoDelivery,
-    SessaoEmpregado, Table, TipoPreco, Transferencia, Zona, ZonaImpressao,
+    DocumentDetail, DocumentSeries, DocumentTemplate, Employee, Entregador, Family,
+    ImpressoraZonaLocal, Local, LocalKind, MesaEstado, MesaEstadoKind, NivelAcesso, Payment,
+    PaymentMethod, PedidoDelivery, SessaoEmpregado, Table, TipoPreco, Transferencia, Zona,
+    ZonaImpressao,
 };
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
@@ -3046,7 +3047,7 @@ pub async fn delete_entregador(pool: &SqlitePool, id: Uuid) -> Result<(), Storag
     Ok(())
 }
 
-const DEVICE_COLS: &str = "id, nome, tipo, modelo, descricao, output_path, ativo, anulado_em";
+const DEVICE_COLS: &str = "id, nome, tipo, modelo, descricao, output_path, ativo, anulado_em, conexao_tipo, conexao_config";
 
 fn dispositivo_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<Dispositivo, StorageError> {
     Ok(Dispositivo {
@@ -3058,6 +3059,11 @@ fn dispositivo_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<Dispositivo, Stor
         output_path: r.try_get("output_path")?,
         ativo: r.try_get::<bool, _>("ativo")?,
         anulado_em: r.try_get::<Option<DateTime<Utc>>, _>("anulado_em")?,
+        conexao_tipo: r.try_get::<Option<String>, _>("conexao_tipo")?.unwrap_or_else(|| "file".into()),
+        conexao_config: r
+            .try_get::<Option<String>, _>("conexao_config")?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null),
     })
 }
 
@@ -3085,6 +3091,8 @@ pub struct NewDispositivo {
     pub modelo: Option<String>,
     pub descricao: Option<String>,
     pub output_path: Option<String>,
+    pub conexao_tipo: String,
+    pub conexao_config: serde_json::Value,
 }
 
 pub async fn create_dispositivo(
@@ -3093,8 +3101,8 @@ pub async fn create_dispositivo(
 ) -> Result<Dispositivo, StorageError> {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO dispositivos (id, nome, tipo, modelo, descricao, output_path, ativo) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+        "INSERT INTO dispositivos (id, nome, tipo, modelo, descricao, output_path, ativo, \
+         conexao_tipo, conexao_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
     )
     .bind(id.to_string())
     .bind(&input.nome)
@@ -3102,6 +3110,8 @@ pub async fn create_dispositivo(
     .bind(input.modelo.as_deref())
     .bind(input.descricao.as_deref())
     .bind(input.output_path.as_deref())
+    .bind(&input.conexao_tipo)
+    .bind(input.conexao_config.to_string())
     .execute(pool)
     .await?;
     get_dispositivo(pool, id).await
@@ -3115,6 +3125,8 @@ pub struct DispositivoUpdate {
     pub descricao: Option<Option<String>>,
     pub output_path: Option<Option<String>>,
     pub ativo: Option<bool>,
+    pub conexao_tipo: Option<String>,
+    pub conexao_config: Option<serde_json::Value>,
 }
 
 pub async fn update_dispositivo(
@@ -3139,6 +3151,12 @@ pub async fn update_dispositivo(
     set!(modelo, "modelo");
     set!(descricao, "descricao");
     set!(output_path, "output_path");
+    set!(conexao_tipo, "conexao_tipo");
+    if let Some(v) = upd.conexao_config {
+        if !first { q.push(", "); }
+        q.push("conexao_config = ").push_bind(v.to_string());
+        first = false;
+    }
     if let Some(v) = upd.ativo {
         if !first { q.push(", "); }
         q.push("ativo = ").push_bind(v as i32);
@@ -3420,6 +3438,88 @@ pub async fn deactivate_atcud(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Documentos configuráveis (templates)
+// ---------------------------------------------------------------------------
+
+fn document_template_from_row(
+    r: &sqlx::sqlite::SqliteRow,
+) -> Result<DocumentTemplate, StorageError> {
+    Ok(DocumentTemplate {
+        id: Uuid::parse_str(r.try_get::<&str, _>("id")?)?,
+        tipo_documento: r.try_get("tipo_documento")?,
+        designacao: r.try_get("designacao")?,
+        cabecalho: r.try_get("cabecalho")?,
+        linha_detalhe: r.try_get("linha_detalhe")?,
+        rodape: r.try_get("rodape")?,
+        nao_imprime_detalhes: r.try_get::<bool, _>("nao_imprime_detalhes")?,
+        largura: r.try_get::<i64, _>("largura")? as i32,
+        anulado_em: r.try_get::<Option<DateTime<Utc>>, _>("anulado_em")?,
+    })
+}
+
+const DOC_TPL_COLS: &str = "id, tipo_documento, designacao, cabecalho, linha_detalhe, \
+        rodape, nao_imprime_detalhes, largura, anulado_em";
+
+pub async fn list_document_templates(
+    pool: &SqlitePool,
+) -> Result<Vec<DocumentTemplate>, StorageError> {
+    let q = format!(
+        "SELECT {DOC_TPL_COLS} FROM documento_templates \
+         WHERE anulado_em IS NULL ORDER BY designacao"
+    );
+    let rows = sqlx::query(&q).fetch_all(pool).await?;
+    rows.iter().map(document_template_from_row).collect()
+}
+
+pub async fn get_document_template(
+    pool: &SqlitePool,
+    tipo_documento: &str,
+) -> Result<DocumentTemplate, StorageError> {
+    let q = format!(
+        "SELECT {DOC_TPL_COLS} FROM documento_templates \
+         WHERE tipo_documento = ?1 AND anulado_em IS NULL"
+    );
+    let row = sqlx::query(&q)
+        .bind(tipo_documento)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+    document_template_from_row(&row)
+}
+
+/// Cria ou actualiza o template de um tipo de documento (chave `tipo_documento`).
+pub async fn upsert_document_template(
+    pool: &SqlitePool,
+    tpl: &DocumentTemplate,
+) -> Result<DocumentTemplate, StorageError> {
+    sqlx::query(
+        "INSERT INTO documento_templates \
+            (id, tipo_documento, designacao, cabecalho, linha_detalhe, rodape, \
+             nao_imprime_detalhes, largura) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+         ON CONFLICT(tipo_documento) DO UPDATE SET \
+            designacao = excluded.designacao, \
+            cabecalho = excluded.cabecalho, \
+            linha_detalhe = excluded.linha_detalhe, \
+            rodape = excluded.rodape, \
+            nao_imprime_detalhes = excluded.nao_imprime_detalhes, \
+            largura = excluded.largura, \
+            anulado_em = NULL",
+    )
+    .bind(tpl.id.to_string())
+    .bind(&tpl.tipo_documento)
+    .bind(&tpl.designacao)
+    .bind(&tpl.cabecalho)
+    .bind(&tpl.linha_detalhe)
+    .bind(&tpl.rodape)
+    .bind(tpl.nao_imprime_detalhes)
+    .bind(tpl.largura as i64)
+    .execute(pool)
+    .await?;
+    get_document_template(pool, &tpl.tipo_documento).await
 }
 
 pub async fn list_atcuds(pool: &SqlitePool) -> Result<Vec<Atcud>, StorageError> {

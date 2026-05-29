@@ -3,12 +3,25 @@ use thiserror::Error;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
+pub mod a4;
 pub mod escpos;
+pub mod escpos_encode;
+pub mod spooler;
+pub mod template;
+pub mod transport;
 
 #[derive(Error, Debug)]
 pub enum PrinterError {
     #[error("IO Error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Timeout ao ligar ao dispositivo")]
+    Timeout,
+    #[error("Erro de ligação: {0}")]
+    Connection(String),
+    #[error("Configuração de ligação inválida: {0}")]
+    Config(String),
+    #[error("Transporte não suportado nesta plataforma: {0}")]
+    Unsupported(String),
 }
 
 /// Phase 1 generic printer: appends formatted receipts to a file so the flow

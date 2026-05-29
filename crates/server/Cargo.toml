@@ -7,6 +7,7 @@ edition = "2021"
 domain = { path = "../domain" }
 storage = { path = "../storage" }
 fiscal = { path = "../fiscal" }
+devices = { path = "../devices" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

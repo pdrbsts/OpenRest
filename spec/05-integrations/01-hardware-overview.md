@@ -2,6 +2,17 @@
 
 > Catálogo dos tipos de dispositivos suportados, suas funcionalidades, ligações e configuração. Detalhes específicos de cada classe ficam em documentos próprios.
 
+> **Estado de implementação (Fase 2)**: a camada de transporte está implementada
+> em `crates/devices` com os tipos de ligação `windows_spooler` (fila RAW do
+> Windows, via FFI ao winspool), `tcp` (impressoras IP, porta 9100), `serial`
+> (porta COM), `file` (mock) e `null`. Cada dispositivo guarda `conexao_tipo` +
+> `conexao_config` (JSON). Há ainda um codificador ESC/POS (codepage Win-1252,
+> estilos, corte, gaveta), uma fila de impressão assíncrona por dispositivo com
+> retry/estado, e impressão A4 (PDF via `printpdf`; GDI no Windows). A topologia
+> completa porta→impressora→gaveta (`pai_dispositivo_id`) e o `configuracao`
+> hierárquico ficam para uma iteração futura — por agora a ligação vive no
+> próprio dispositivo.
+
 ## 1. Filosofia
 
 Cada dispositivo é uma entidade `dispositivo` na BD com `tipo`, `pai_dispositivo_id` (cadeia: gaveta → impressora → porta), e `configuracao` em JSON.

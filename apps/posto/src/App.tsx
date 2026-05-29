@@ -27,6 +27,8 @@ import {
 import { AtSeriesView } from "./AtSeriesView";
 import { ClientesView } from "./ClientesView";
 import { ConfigView } from "./ConfigView";
+import { DocumentTemplatesView } from "./DocumentTemplatesView";
+import { DispositivosView } from "./DispositivosView";
 import { CustomerPicker, DespachoView } from "./DeliveryView";
 
 type View =
@@ -35,7 +37,9 @@ type View =
   | "config"
   | "despacho"
   | "clientes"
-  | "at-series";
+  | "at-series"
+  | "documentos"
+  | "dispositivos";
 
 const fmtMoney = (cents: number) => (cents / 100).toFixed(2) + "€";
 
@@ -499,6 +503,8 @@ function App() {
         onDespacho={() => setView("despacho")}
         onClientes={() => setView("clientes")}
         onAtSeries={() => setView("at-series")}
+        onDocumentos={() => setView("documentos")}
+        onDispositivos={() => setView("dispositivos")}
         showDespacho={(locais() ?? []).some((l) => l.tipo === "delivery")}
       />
 
@@ -563,6 +569,14 @@ function App() {
 
           <Show when={view() === "at-series"}>
             <AtSeriesView />
+          </Show>
+
+          <Show when={view() === "documentos"}>
+            <DocumentTemplatesView />
+          </Show>
+
+          <Show when={view() === "dispositivos"}>
+            <DispositivosView />
           </Show>
 
           <Show when={view() === "order" && activeTable()}>
@@ -841,6 +855,8 @@ function Sidebar(props: {
   onDespacho: () => void;
   onClientes: () => void;
   onAtSeries: () => void;
+  onDocumentos: () => void;
+  onDispositivos: () => void;
   showDespacho: boolean;
 }) {
   const active = "bg-blue-600 hover:bg-blue-500 text-white";
@@ -890,6 +906,22 @@ function Sidebar(props: {
         }`}
       >
         Séries AT
+      </button>
+      <button
+        onClick={props.onDocumentos}
+        class={`w-16 h-16 rounded-xl transition-colors shadow-lg flex items-center justify-center font-semibold text-xs leading-tight ${
+          props.view === "documentos" ? active : inactive
+        }`}
+      >
+        Documentos
+      </button>
+      <button
+        onClick={props.onDispositivos}
+        class={`w-16 h-16 rounded-xl transition-colors shadow-lg flex items-center justify-center font-semibold text-xs leading-tight ${
+          props.view === "dispositivos" ? active : inactive
+        }`}
+      >
+        Hardware
       </button>
       <button
         onClick={props.onConfig}

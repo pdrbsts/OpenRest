@@ -204,6 +204,10 @@ pub struct Dispositivo {
     pub output_path: Option<String>,
     pub ativo: bool,
     pub anulado_em: Option<DateTime<Utc>>,
+    /// Transporte: file | null | tcp | serial | windows_spooler.
+    pub conexao_tipo: String,
+    /// Parâmetros da ligação (host/port, porta COM, nome da fila Windows, …).
+    pub conexao_config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -212,6 +216,21 @@ pub struct ZonaImpressao {
     pub codigo: i32,
     pub designacao: String,
     pub secundarios: bool,
+    pub anulado_em: Option<DateTime<Utc>>,
+}
+
+/// Template configurável de um tipo de documento (spec
+/// 08-appendices/02-printer-flags.md). Renderizado por `devices::template`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DocumentTemplate {
+    pub id: Uuid,
+    pub tipo_documento: String,
+    pub designacao: String,
+    pub cabecalho: String,
+    pub linha_detalhe: String,
+    pub rodape: String,
+    pub nao_imprime_detalhes: bool,
+    pub largura: i32,
     pub anulado_em: Option<DateTime<Utc>>,
 }
 
