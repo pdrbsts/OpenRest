@@ -11,6 +11,18 @@ const LOCAL_KINDS: LocalKind[] = [
   "restauracao_colectiva",
 ];
 
+const KIND_LABELS: Record<LocalKind, string> = {
+  normal: "Normal",
+  take_away: "Take away",
+  take_away_seguro: "Take away seguro",
+  pub: "Pub",
+  delivery: "Delivery",
+  consumo_proprio: "Consumo próprio",
+  restauracao_colectiva: "Restauração colectiva",
+};
+
+const kindLabel = (k: LocalKind): string => KIND_LABELS[k] ?? k;
+
 interface Props {
   locais: Local[];
   tablesByLocal: Record<string, Table[]>;
@@ -73,7 +85,7 @@ export function ConfigView(props: Props) {
                 }`}
               >
                 <div class="font-medium">{l.designacao}</div>
-                <div class="text-xs text-zinc-400">{l.tipo}</div>
+                <div class="text-xs text-zinc-400">{kindLabel(l.tipo)}</div>
               </button>
             )}
           </For>
@@ -183,7 +195,9 @@ function LocalForm(props: {
               props.onChange({ tipo: v });
             }}
           >
-            <For each={LOCAL_KINDS}>{(k) => <option value={k}>{k}</option>}</For>
+            <For each={LOCAL_KINDS}>
+              {(k) => <option value={k}>{kindLabel(k)}</option>}
+            </For>
           </select>
         </label>
       </div>
@@ -322,8 +336,15 @@ function MesasEditor(props: {
     const drag = dragging();
     if (!drag) return;
     const container = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const x = Math.max(0, e.clientX - container.left - drag.offsetX);
-    const y = Math.max(0, e.clientY - container.top - drag.offsetY);
+    // Limita a posição ao interior do canvas (não deixar a mesa sair à
+    // direita/baixo nem para coordenadas negativas).
+    const t = props.tables.find((tt) => tt.id === drag.id);
+    const tw = t?.largura ?? 80;
+    const th = t?.altura ?? 60;
+    const maxX = Math.max(0, widthPx - tw);
+    const maxY = Math.max(0, heightPx - th);
+    const x = Math.min(maxX, Math.max(0, e.clientX - container.left - drag.offsetX));
+    const y = Math.min(maxY, Math.max(0, e.clientY - container.top - drag.offsetY));
     // optimistic visual update via DOM
     const el = document.getElementById(`mesa-${drag.id}`);
     if (el) {
@@ -411,16 +432,21 @@ function MesasEditor(props: {
             </For>
           </div>
 
-          <Show when={pickedId() && props.tables.find((t) => t.id === pickedId())}>
-            <MesaForm
-              key={pickedId()!}
-              table={props.tables.find((t) => t.id === pickedId())!}
-              onUpdate={(b) => props.onUpdate(pickedId()!, b)}
-              onDelete={() => {
-                props.onDelete(pickedId()!);
-                setPickedId(null);
-              }}
-            />
+          <Show when={pickedId()} keyed>
+            {(id) => (
+              <Show when={props.tables.find((t) => t.id === id)}>
+                {(table) => (
+                  <MesaForm
+                    table={table()}
+                    onUpdate={(b) => props.onUpdate(id, b)}
+                    onDelete={() => {
+                      props.onDelete(id);
+                      setPickedId(null);
+                    }}
+                  />
+                )}
+              </Show>
+            )}
           </Show>
         </div>
       </Show>
@@ -454,23 +480,27 @@ function TableList(props: {
           )}
         </For>
       </div>
-      <Show when={props.pickedId && props.tables.find((t) => t.id === props.pickedId)}>
-        <MesaForm
-          key={props.pickedId!}
-          table={props.tables.find((t) => t.id === props.pickedId)!}
-          onUpdate={(b) => props.onUpdate(props.pickedId!, b)}
-          onDelete={() => {
-            props.onDelete(props.pickedId!);
-            props.setPicked(null);
-          }}
-        />
+      <Show when={props.pickedId} keyed>
+        {(id) => (
+          <Show when={props.tables.find((t) => t.id === id)}>
+            {(table) => (
+              <MesaForm
+                table={table()}
+                onUpdate={(b) => props.onUpdate(id, b)}
+                onDelete={() => {
+                  props.onDelete(id);
+                  props.setPicked(null);
+                }}
+              />
+            )}
+          </Show>
+        )}
       </Show>
     </div>
   );
 }
 
 function MesaForm(props: {
-  key: string;
   table: Table;
   onUpdate: (b: Partial<Table>) => void;
   onDelete: () => void;

@@ -235,7 +235,11 @@ export interface DocumentDetail {
   document_id: string;
   article_id: string;
   qty: number;
+  /** Quantidade em milli-unidades (1000 = 1). Pode ser fraccionária (modo
+   * Quantidades) ou negativa (compensações Encaixar). */
+  qty_milli: number;
   unit_price: number;
+  /** Cêntimos. Pode ser negativo em linhas de compensação Encaixar. */
   total: number;
   pedida_em: string | null;
   anulada: boolean;
@@ -243,6 +247,8 @@ export interface DocumentDetail {
   anulada_em: string | null;
   anulada_por: string | null;
   anulada_motivo: string | null;
+  /** Sobreposição do rótulo da linha (ex: "Compensação Café"). */
+  descricao: string | null;
 }
 
 export interface DocumentDto {
@@ -305,6 +311,32 @@ export interface CurrentDayResponse {
 export interface CatalogResponse {
   families: Family[];
   articles: Article[];
+}
+
+// Resposta do AT Series WS para uma série comunicada/consultada.
+export interface AtSeriesInfo {
+  serie: string;
+  tipo_serie: string;
+  classe_doc: string;
+  tipo_doc: string;
+  num_inicial_seq: number;
+  num_final_seq: number | null;
+  data_inicio_prev_utiliz: string;
+  seq_ultimo_doc_emitido: number | null;
+  meio_processamento: string;
+  num_cert_sw_fatur: number;
+  cod_validacao_serie: string;
+  data_registo: string;
+  estado: string;
+  motivo_estado: string | null;
+  justificacao: string | null;
+  data_estado: string;
+  nif_comunicou: string;
+}
+
+export interface AtSerieResponse {
+  info: AtSeriesInfo;
+  persisted: boolean;
 }
 
 export interface Transferencia {
@@ -562,11 +594,11 @@ export const api = {
     }>(`/api/documents/${documentId}/split/auto-plan?num_accounts=${numAccounts}`),
 
   /**
-   * Divide um documento em N filhos. `assignments.length` = N. Cada filho
-   * fica aberto pronto a ser fechado individualmente. Retorna todos os
-   * filhos criados.
+   * Divide um documento em N filhos. Modo Linhas (atribuição manual de
+   * linhas inteiras): cada filho fica com as suas linhas e o respectivo
+   * total. Cada filho fica aberto pronto a ser fechado individualmente.
    */
-  splitDocument: (
+  splitDocumentLines: (
     documentId: string,
     assignments: Array<{ line_ids: string[] }>
   ) =>
@@ -574,9 +606,102 @@ export const api = {
       `/api/documents/${documentId}/split`,
       {
         method: "POST",
-        body: JSON.stringify({ assignments }),
+        body: JSON.stringify({ mode: "lines", assignments }),
       }
     ),
+
+  /**
+   * Divide um documento em N filhos. Modo Quantidades: cada linha elegível
+   * é dividida fraccionariamente em N partes. Cada filho fica com o mesmo
+   * total (o cêntimo residual é absorvido pelo pai).
+   */
+  splitDocumentQuantidades: (documentId: string, numAccounts: number) =>
+    jsonReq<{ children: DocumentResponse[] }>(
+      `/api/documents/${documentId}/split`,
+      {
+        method: "POST",
+        body: JSON.stringify({ mode: "quantidades", num_accounts: numAccounts }),
+      }
+    ),
+
+  /**
+   * Divide um documento em N filhos. Modo Encaixar: operador atribui linhas
+   * a contas primárias; sistema gera linhas de compensação para igualar os
+   * totais. Cada conta = total_elegível/N.
+   */
+  splitDocumentEncaixar: (
+    documentId: string,
+    assignments: Array<{ line_ids: string[] }>
+  ) =>
+    jsonReq<{ children: DocumentResponse[] }>(
+      `/api/documents/${documentId}/split`,
+      {
+        method: "POST",
+        body: JSON.stringify({ mode: "encaixar", assignments }),
+      }
+    ),
+
+  // ===== AT SeriesWS =====
+  atRegistarSerie: (body: {
+    serie: string;
+    tipo_serie?: "N" | "T";
+    classe_doc: string;
+    tipo_doc: string;
+    num_inicial_seq: number;
+    data_inicio_prev_utiliz: string; // YYYY-MM-DD
+    meio_processamento: string;
+    num_cert_sw_fatur?: number;
+  }) =>
+    jsonReq<AtSerieResponse>("/api/at-series/registar", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  atConsultarSeries: (
+    body: Partial<{
+      serie: string;
+      tipo_serie: "N" | "T";
+      classe_doc: string;
+      tipo_doc: string;
+      cod_validacao_serie: string;
+      data_registo_de: string;
+      data_registo_ate: string;
+      estado: string;
+      meio_processamento: string;
+    }> = {}
+  ) =>
+    jsonReq<{ items: AtSeriesInfo[] }>("/api/at-series/consultar", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  atFinalizarSerie: (body: {
+    serie: string;
+    classe_doc: string;
+    tipo_doc: string;
+    cod_validacao_serie: string;
+    seq_ultimo_doc_emitido: number;
+    justificacao?: string;
+    year?: number;
+  }) =>
+    jsonReq<AtSerieResponse>("/api/at-series/finalizar", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  atAnularSerie: (body: {
+    serie: string;
+    classe_doc: string;
+    tipo_doc: string;
+    cod_validacao_serie: string;
+    motivo: string;
+    declaracao_nao_emissao: boolean;
+    year?: number;
+  }) =>
+    jsonReq<AtSerieResponse>("/api/at-series/anular", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   printDocument: async (documentId: string): Promise<string> => {
     const res = await fetch(`${BASE}/api/documents/${documentId}/print`, {

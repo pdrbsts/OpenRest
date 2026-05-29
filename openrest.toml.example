@@ -30,3 +30,22 @@ registry_office = "Conservatória de Lisboa"
 registry_number = "999999990"
 software_certificate = "0000/AT"      # placeholder até certificação real
 default_vat_rate = 1300               # basis points (13%)
+
+# Comunicação de Séries à AT (web-service SOAP `SeriesWS`). Em ambiente de
+# desenvolvimento usamos o endpoint de testes com o NIF/subutilizador
+# públicos da AT (599999993/0037). Em produção: substituir tudo abaixo
+# pelas credenciais reais e pela chave pública AT do ambiente prod.
+[at_series]
+endpoint = "https://servicos.portaldasfinancas.gov.pt:722/SeriesWSService"
+username = "599999993/0037"
+password = "testes1234"                # password de teste da AT
+public_key_path = "./keys/at_test_public.pem"
+# O endpoint :722 (teste) e :422 (produção) da AT exigem TLS mútuo. O
+# certificado de cliente tem de ser emitido por "AT Issuing CA1" ou
+# "DGITA Issuing CA1". Em produção: gera-se um certificado próprio no
+# Portal das Finanças → Apoio ao Contribuinte → Webservices.
+client_pfx_path = "./keys/at_test_client.pfx"
+client_pfx_password = "TESTEwebservice"
+# Número do certificado AT do software de facturação (0 = não aplicável,
+# usado durante desenvolvimento e até certificação)
+num_cert_sw_fatur = 0

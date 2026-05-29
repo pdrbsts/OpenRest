@@ -583,8 +583,14 @@ pub struct DocumentDetail {
     pub id: Uuid,
     pub document_id: Uuid,
     pub article_id: Uuid,
+    /// Quantidade em unidades inteiras. Conservado para compatibilidade com
+    /// código antigo; em linhas fraccionárias é `qty_milli / 1000` truncado.
     pub qty: i32,
+    /// Quantidade em milli-unidades (1.000 = 1 unidade). Pode ser negativo em
+    /// linhas de compensação geradas pelo modo Encaixar.
+    pub qty_milli: i64,
     pub unit_price: i64,
+    /// Total em cêntimos. Pode ser negativo em linhas de compensação.
     pub total: i64,
     pub pedida_em: Option<DateTime<Utc>>,
     pub anulada: bool,
@@ -592,6 +598,10 @@ pub struct DocumentDetail {
     pub anulada_em: Option<DateTime<Utc>>,
     pub anulada_por: Option<Uuid>,
     pub anulada_motivo: Option<String>,
+    /// Sobreposição opcional do rótulo da linha (e.g., "Compensação Café"
+    /// em linhas geradas pelo modo Encaixar). Quando preenchido, o recibo e
+    /// a UI usam este texto em vez de `article.name`.
+    pub descricao: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

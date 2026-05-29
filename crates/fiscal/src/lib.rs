@@ -309,8 +309,11 @@ mod tests {
 
     #[test]
     fn q_chars_picks_correct_positions() {
+        // Portaria 195/2020 (anexo do QR Code, campo I) e spec interna
+        // 05-integrations/02-fiscal-compliance.md §3.2: caracteres das
+        // posições 1, 11, 21 e 31 (1-indexed) da assinatura Base64.
         let s = "abcdefghijklmnopqrstuvwxyzABCDEFG";
-        assert_eq!(q_chars(s), "ajtD");
+        assert_eq!(q_chars(s), "akuE");
     }
 
     #[test]

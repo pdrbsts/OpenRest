@@ -260,7 +260,7 @@ export function DespachoView(_props: DespachoProps) {
       <div class="px-6 py-3 border-b border-zinc-800 flex items-center justify-between bg-zinc-900">
         <h1 class="text-xl font-bold">Despacho — pedidos pendentes</h1>
         <button
-          onClick={refetch as any}
+          onClick={() => refetch()}
           class="text-sm px-3 py-1.5 rounded-md bg-zinc-700 hover:bg-zinc-600"
         >
           Refrescar
@@ -331,9 +331,10 @@ export function DespachoView(_props: DespachoProps) {
                       <Show when={d.estado === "pronto"}>
                         <select
                           class="bg-zinc-800 rounded-md px-2 py-1 text-xs border border-zinc-700"
-                          onChange={(e) =>
-                            transition(d.id, "despachado", e.currentTarget.value)
-                          }
+                          onChange={(e) => {
+                            if (!e.currentTarget.value) return;
+                            transition(d.id, "despachado", e.currentTarget.value);
+                          }}
                         >
                           <option value="">— atribuir entregador —</option>
                           <For each={entregadores() ?? []}>

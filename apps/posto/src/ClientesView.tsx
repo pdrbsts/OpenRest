@@ -111,20 +111,19 @@ export function ClientesView() {
               Selecciona um cliente para editar, ou cria um novo.
             </div>
           }
+          keyed
         >
-          <CustomerForm
-            initial={editing() === "new" ? null : (editing() as Customer)}
-            onCancel={() => setEditing(null)}
-            onSaved={async () => {
-              await refetch();
-              setEditing(null);
-            }}
-            onForget={
-              editing() === "new"
-                ? undefined
-                : () => forget(editing() as Customer)
-            }
-          />
+          {(ed) => (
+            <CustomerForm
+              initial={ed === "new" ? null : ed}
+              onCancel={() => setEditing(null)}
+              onSaved={async () => {
+                await refetch();
+                setEditing(null);
+              }}
+              onForget={ed === "new" ? undefined : () => forget(ed)}
+            />
+          )}
         </Show>
       </div>
     </div>

@@ -383,16 +383,23 @@ pub async fn get_document(pool: &SqlitePool, id: Uuid) -> Result<Document, Stora
     document_from_row(&row)
 }
 
-const DETAIL_COLS: &str = "id, document_id, article_id, qty, unit_price, total, pedida_em, \
-        anulada, anulada_com_desperdicio, anulada_em, anulada_por, anulada_motivo";
+const DETAIL_COLS: &str = "id, document_id, article_id, qty, qty_milli, unit_price, total, \
+        pedida_em, anulada, anulada_com_desperdicio, anulada_em, anulada_por, anulada_motivo, \
+        descricao";
 
 fn detail_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<DocumentDetail, StorageError> {
     let anulada_por: Option<String> = r.try_get("anulada_por")?;
+    let qty: i32 = r.try_get::<i64, _>("qty")? as i32;
+    // Linhas pré-migration têm qty_milli = NULL — derivamos a partir de qty.
+    let qty_milli: i64 = r
+        .try_get::<Option<i64>, _>("qty_milli")?
+        .unwrap_or((qty as i64) * 1000);
     Ok(DocumentDetail {
         id: Uuid::parse_str(r.try_get::<&str, _>("id")?)?,
         document_id: Uuid::parse_str(r.try_get::<&str, _>("document_id")?)?,
         article_id: Uuid::parse_str(r.try_get::<&str, _>("article_id")?)?,
-        qty: r.try_get::<i64, _>("qty")? as i32,
+        qty,
+        qty_milli,
         unit_price: r.try_get::<i64, _>("unit_price")?,
         total: r.try_get::<i64, _>("total")?,
         pedida_em: r.try_get::<Option<DateTime<Utc>>, _>("pedida_em")?,
@@ -401,6 +408,7 @@ fn detail_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<DocumentDetail, Storag
         anulada_em: r.try_get::<Option<DateTime<Utc>>, _>("anulada_em")?,
         anulada_por: parse_optional_uuid(anulada_por)?,
         anulada_motivo: r.try_get("anulada_motivo")?,
+        descricao: r.try_get::<Option<String>, _>("descricao")?,
     })
 }
 
@@ -1191,16 +1199,18 @@ pub async fn add_document_line(
 ) -> Result<DocumentDetail, StorageError> {
     let total = unit_price * qty as i64;
     let detail_id = Uuid::new_v4();
+    let qty_milli = (qty as i64) * 1000;
 
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO document_details (id, document_id, article_id, qty, unit_price, total) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO document_details (id, document_id, article_id, qty, qty_milli, unit_price, total) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
     .bind(detail_id.to_string())
     .bind(document_id.to_string())
     .bind(article_id.to_string())
     .bind(qty as i64)
+    .bind(qty_milli)
     .bind(unit_price)
     .bind(total)
     .execute(&mut *tx)
@@ -1227,6 +1237,7 @@ pub async fn add_document_line(
         document_id,
         article_id,
         qty,
+        qty_milli,
         unit_price,
         total,
         pedida_em: None,
@@ -1235,6 +1246,7 @@ pub async fn add_document_line(
         anulada_em: None,
         anulada_por: None,
         anulada_motivo: None,
+        descricao: None,
     })
 }
 
@@ -1611,6 +1623,315 @@ pub async fn split_document(
     // Materializa os filhos com totais persistidos.
     let mut out = Vec::with_capacity(created.len());
     for (child, _) in created {
+        out.push(get_document(pool, child.id).await?);
+    }
+    Ok(out)
+}
+
+/// Insere uma linha (potencialmente fraccionária) num documento existente.
+/// Não actualiza totais de documento/mesa — caller é responsável por o fazer
+/// dentro da mesma transacção. Usado pelos modos Quantidades e Encaixar.
+async fn insert_line_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    document_id: Uuid,
+    article_id: Uuid,
+    qty_milli: i64,
+    unit_price: i64,
+    total: i64,
+    descricao: Option<&str>,
+    pedida_em: Option<DateTime<Utc>>,
+) -> Result<Uuid, StorageError> {
+    let id = Uuid::new_v4();
+    // qty inteiro é apenas para compatibilidade com leitores antigos; o que conta
+    // é qty_milli e total. Usamos truncamento (qty_milli / 1000) — para shares
+    // sub-unitários (e.g., 500) fica qty=0, o que é correcto.
+    let qty_int = qty_milli / 1000;
+    sqlx::query(
+        "INSERT INTO document_details (id, document_id, article_id, qty, qty_milli, unit_price, \
+         total, pedida_em, descricao) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )
+    .bind(id.to_string())
+    .bind(document_id.to_string())
+    .bind(article_id.to_string())
+    .bind(qty_int)
+    .bind(qty_milli)
+    .bind(unit_price)
+    .bind(total)
+    .bind(pedida_em)
+    .bind(descricao)
+    .execute(&mut **tx)
+    .await?;
+    Ok(id)
+}
+
+/// Modo **Quantidades**: divide cada linha elegível do pai em N partes iguais.
+/// Cada filho recebe N linhas (uma por linha original) com `qty_milli` e
+/// `total` proporcionais. Se uma linha L=151c e N=3, cada filho recebe 50c
+/// (o cêntimo residual é absorvido pelo pai, que fica split-closed).
+///
+/// Garantia: **todas** as contas-filho ficam com o mesmo total, mesmo que a
+/// soma fique 1c abaixo do total original.
+pub async fn split_document_quantidades(
+    pool: &SqlitePool,
+    parent_id: Uuid,
+    num_accounts: usize,
+) -> Result<Vec<Document>, StorageError> {
+    if num_accounts < 2 {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "split requires at least 2 accounts".into(),
+        )));
+    }
+    let parent = get_document(pool, parent_id).await?;
+    if parent.is_closed {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "parent document already closed".into(),
+        )));
+    }
+    let lines = list_document_details(pool, parent_id).await?;
+    let eligible: Vec<&DocumentDetail> = lines
+        .iter()
+        .filter(|l| l.pedida_em.is_some() && !l.anulada)
+        .collect();
+    if eligible.is_empty() {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "no eligible lines to split".into(),
+        )));
+    }
+
+    let mut tx = pool.begin().await?;
+    let mut children = Vec::with_capacity(num_accounts);
+    for _ in 0..num_accounts {
+        children.push(create_child_document_tx(&mut tx, &parent).await?);
+    }
+
+    let n = num_accounts as i64;
+    let mut child_totals: Vec<i64> = vec![0; num_accounts];
+    let mut moved_total: i64 = 0;
+
+    for line in &eligible {
+        // Cada conta recebe `share` cêntimos da linha. O resto (line.total -
+        // n*share) é absorvido pelo pai. Igualmente para qty_milli.
+        let share_cents = line.total / n;
+        let share_milli = line.qty_milli / n;
+        if share_cents <= 0 {
+            // Linha cobra menos de 1c por conta — não dá para representar como
+            // share igual entre contas com inteiros. Salta-a (fica no pai).
+            continue;
+        }
+        for (idx, child) in children.iter().enumerate() {
+            insert_line_tx(
+                &mut tx,
+                child.id,
+                line.article_id,
+                share_milli,
+                line.unit_price,
+                share_cents,
+                None,
+                line.pedida_em,
+            )
+            .await?;
+            child_totals[idx] += share_cents;
+        }
+        moved_total += n * share_cents;
+        // Apaga a linha original do pai (já redistribuída).
+        sqlx::query("DELETE FROM document_details WHERE id = ?1")
+            .bind(line.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    for (child, total) in children.iter().zip(child_totals.iter()) {
+        sqlx::query("UPDATE documents SET total = ?1 WHERE id = ?2")
+            .bind(*total)
+            .bind(child.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // Pai: total = total residual (parcela perdida ao arredondar). Marca-o
+    // operacionalmente fechado e liberta a mesa.
+    sqlx::query("UPDATE documents SET total = total - ?1, is_closed = 1 WHERE id = ?2")
+        .bind(moved_total)
+        .bind(parent_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    if let Some(table_id) = parent.table_id {
+        sqlx::query(
+            "UPDATE mesa_estado SET estado = 'livre', empregado_actual_id = NULL, \
+             aberta_em = NULL, subtotal_actual = 0 WHERE mesa_id = ?1",
+        )
+        .bind(table_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    let mut out = Vec::with_capacity(children.len());
+    for child in children {
+        out.push(get_document(pool, child.id).await?);
+    }
+    Ok(out)
+}
+
+/// Modo **Encaixar**: o operador atribui as linhas elegíveis a contas
+/// "primárias" (via `assignments`). Cada conta acaba com `target = total/N`,
+/// graças a linhas de compensação positivas/negativas geradas pelo sistema.
+///
+/// Para cada linha L atribuída à conta A, gera:
+///   * em A: -share por cada outra conta B (total -L.total*(N-1)/N)
+///   * em cada outra B: +share
+///
+/// Cêntimos residuais (quando L.total não divide por N) são absorvidos pelo
+/// pai — garantia: todas as contas-filho têm exactamente o mesmo total.
+pub async fn split_document_encaixar(
+    pool: &SqlitePool,
+    parent_id: Uuid,
+    assignments: &[SplitAssignment],
+) -> Result<Vec<Document>, StorageError> {
+    if assignments.len() < 2 {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "encaixar requires at least 2 accounts".into(),
+        )));
+    }
+    let parent = get_document(pool, parent_id).await?;
+    if parent.is_closed {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "parent document already closed".into(),
+        )));
+    }
+    let parent_lines = list_document_details(pool, parent_id).await?;
+    let n = assignments.len() as i64;
+
+    // Map line_id -> (line, assigned account index)
+    let mut line_owner: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
+    for (idx, a) in assignments.iter().enumerate() {
+        for lid in &a.line_ids {
+            if line_owner.insert(*lid, idx).is_some() {
+                return Err(StorageError::Database(sqlx::Error::Protocol(
+                    "line assigned to more than one account".into(),
+                )));
+            }
+        }
+    }
+    // Valida elegibilidade
+    let mut eligible_lines: Vec<&DocumentDetail> = Vec::new();
+    for (lid, _) in &line_owner {
+        let line = parent_lines
+            .iter()
+            .find(|l| l.id == *lid)
+            .ok_or(StorageError::NotFound)?;
+        if line.pedida_em.is_none() || line.anulada {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "line not eligible for encaixar (must be ordered, not anulada)".into(),
+            )));
+        }
+        eligible_lines.push(line);
+    }
+    if eligible_lines.is_empty() {
+        return Err(StorageError::Database(sqlx::Error::Protocol(
+            "no eligible lines for encaixar".into(),
+        )));
+    }
+
+    let mut tx = pool.begin().await?;
+    let mut children = Vec::with_capacity(assignments.len());
+    for _ in 0..assignments.len() {
+        children.push(create_child_document_tx(&mut tx, &parent).await?);
+    }
+
+    let mut child_totals: Vec<i64> = vec![0; assignments.len()];
+    let mut moved_total: i64 = 0;
+
+    for line in &eligible_lines {
+        let owner_idx = line_owner[&line.id];
+        // Cada outra conta recebe share = floor(line.total / N). O cêntimo
+        // residual é perdido no pai (mantém-se a invariante de igualdade).
+        let share = line.total / n;
+        if share <= 0 {
+            // Linha não amortizável; deixa no pai.
+            continue;
+        }
+        // Mover a linha original para a conta primária.
+        sqlx::query("UPDATE document_details SET document_id = ?1 WHERE id = ?2")
+            .bind(children[owner_idx].id.to_string())
+            .bind(line.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        child_totals[owner_idx] += line.total;
+        moved_total += line.total;
+
+        // Resolve a descrição da compensação a partir do nome do artigo.
+        let article_name: String = sqlx::query("SELECT name FROM articles WHERE id = ?1")
+            .bind(line.article_id.to_string())
+            .fetch_one(&mut *tx)
+            .await?
+            .try_get("name")?;
+        let comp_desc = format!("Compensação {}", article_name);
+
+        // Para cada outra conta: insere +share lá e -share na primária.
+        let share_milli = line.qty_milli / n; // proporcional, informativo
+        for other_idx in 0..assignments.len() {
+            if other_idx == owner_idx {
+                continue;
+            }
+            insert_line_tx(
+                &mut tx,
+                children[other_idx].id,
+                line.article_id,
+                share_milli,
+                line.unit_price,
+                share,
+                Some(&comp_desc),
+                line.pedida_em,
+            )
+            .await?;
+            child_totals[other_idx] += share;
+
+            insert_line_tx(
+                &mut tx,
+                children[owner_idx].id,
+                line.article_id,
+                -share_milli,
+                line.unit_price,
+                -share,
+                Some(&comp_desc),
+                line.pedida_em,
+            )
+            .await?;
+            child_totals[owner_idx] -= share;
+        }
+    }
+
+    for (child, total) in children.iter().zip(child_totals.iter()) {
+        sqlx::query("UPDATE documents SET total = ?1 WHERE id = ?2")
+            .bind(*total)
+            .bind(child.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // Pai: subtrai o que foi movido; marca-o split-closed e liberta a mesa.
+    sqlx::query("UPDATE documents SET total = total - ?1, is_closed = 1 WHERE id = ?2")
+        .bind(moved_total)
+        .bind(parent_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    if let Some(table_id) = parent.table_id {
+        sqlx::query(
+            "UPDATE mesa_estado SET estado = 'livre', empregado_actual_id = NULL, \
+             aberta_em = NULL, subtotal_actual = 0 WHERE mesa_id = ?1",
+        )
+        .bind(table_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    let mut out = Vec::with_capacity(children.len());
+    for child in children {
         out.push(get_document(pool, child.id).await?);
     }
     Ok(out)
@@ -3027,6 +3348,77 @@ pub async fn delete_print_mapping(pool: &SqlitePool, id: Uuid) -> Result<(), Sto
         .bind(id.to_string())
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// Insere ou actualiza o ATCUD (código de validação de série) para a tupla
+/// `(document_type, series_prefix, year)`. Marca quaisquer ATCUDs anteriores
+/// dessa tupla como `is_active=0` — garante que apenas uma entrada activa
+/// existe por série/ano (a última obtida da AT).
+pub async fn upsert_atcud(
+    pool: &SqlitePool,
+    document_type: &str,
+    series_prefix: &str,
+    year: i32,
+    atcud: &str,
+    start_date: NaiveDate,
+) -> Result<Atcud, StorageError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE atcud SET is_active = 0 \
+         WHERE document_type = ?1 AND series_prefix = ?2 AND year = ?3 AND is_active = 1",
+    )
+    .bind(document_type)
+    .bind(series_prefix)
+    .bind(year as i64)
+    .execute(&mut *tx)
+    .await?;
+
+    let id = Uuid::new_v4();
+    let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO atcud (id, document_type, series_prefix, year, atcud, start_date, \
+         registered_at, is_active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
+    )
+    .bind(id.to_string())
+    .bind(document_type)
+    .bind(series_prefix)
+    .bind(year as i64)
+    .bind(atcud)
+    .bind(start_date)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Atcud {
+        id,
+        document_type: document_type.into(),
+        series_prefix: series_prefix.into(),
+        year,
+        atcud: atcud.into(),
+        start_date,
+        registered_at: now,
+        is_active: true,
+    })
+}
+
+/// Marca o ATCUD activo de uma série como inactivo (sem o apagar — mantém
+/// histórico). Usado após `finalizarSerie` ou `anularSerie` na AT.
+pub async fn deactivate_atcud(
+    pool: &SqlitePool,
+    document_type: &str,
+    series_prefix: &str,
+    year: i32,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE atcud SET is_active = 0 \
+         WHERE document_type = ?1 AND series_prefix = ?2 AND year = ?3 AND is_active = 1",
+    )
+    .bind(document_type)
+    .bind(series_prefix)
+    .bind(year as i64)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

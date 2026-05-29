@@ -1,8 +1,12 @@
 use chrono::{DateTime, Utc};
 
 pub struct ReceiptLine<'a> {
+    /// Rótulo da linha: nome do artigo ou `descricao` em linhas geradas
+    /// pelos modos Encaixar/compensação (e.g., "Compensação Café").
     pub name: &'a str,
-    pub qty: i32,
+    /// Quantidade em milli-unidades (1.000 = 1 unidade). Suporta valores
+    /// fraccionários (modo Quantidades) e negativos (compensações Encaixar).
+    pub qty_milli: i64,
     pub unit_price: i64,
     pub total: i64,
     pub vat_label: String,
@@ -45,6 +49,29 @@ fn fmt_cents(v: i64) -> String {
     let sign = if v < 0 { "-" } else { "" };
     let abs = v.abs();
     format!("{sign}{}.{:02}", abs / 100, abs % 100)
+}
+
+/// Formata uma quantidade em milli-unidades. Inteiros saem como "Nx"; valores
+/// fraccionários saem como "N.NNNx" (até 3 casas decimais, sem zeros à
+/// direita); valores negativos preservam o sinal.
+fn fmt_qty_milli(q: i64) -> String {
+    let sign = if q < 0 { "-" } else { "" };
+    let abs = q.abs();
+    let units = abs / 1000;
+    let frac = abs % 1000;
+    if frac == 0 {
+        return format!("{sign}{units}x");
+    }
+    // Remove trailing zeros: 500 -> "5", 50 -> "05" -> "05" (não trim). Mais
+    // simples: divide o frac por 100/10/1 conforme necessário.
+    let s = if frac % 100 == 0 {
+        format!("{}", frac / 100)
+    } else if frac % 10 == 0 {
+        format!("{:02}", frac / 10)
+    } else {
+        format!("{:03}", frac)
+    };
+    format!("{sign}{units}.{s}x")
 }
 
 fn pad_right(s: &str, n: usize) -> String {
@@ -252,11 +279,11 @@ pub fn format_legal_receipt(ctx: ReceiptCtx<'_>) -> String {
     out.push_str(&pad_left("Total", 11));
     out.push('\n');
     for line in &ctx.lines {
-        let qty = format!("{}x", line.qty);
+        let qty = fmt_qty_milli(line.qty_milli);
         let row = format!(
             "{} {}",
-            pad_left(&qty, 3),
-            pad_right(line.name, name_col - 4),
+            pad_left(&qty, 6),
+            pad_right(line.name, name_col - 7),
         );
         out.push_str(&pad_right(&row, name_col));
         out.push_str(&pad_left(&line.vat_label, 5));

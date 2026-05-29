@@ -88,6 +88,26 @@ impl Default for CompanyConfig {
     }
 }
 
+/// Credenciais e endpoint para o web-service `SeriesWS` da AT. Em testes
+/// usa-se o endpoint `:722` com NIF público `599999993/0037`; em produção
+/// substitui-se tudo (endpoint, credenciais, chave pública).
+#[derive(Clone, Debug, Deserialize)]
+pub struct AtSeriesConfig {
+    pub endpoint: String,
+    pub username: String,
+    pub password: String,
+    pub public_key_path: std::path::PathBuf,
+    /// PFX/PKCS#12 do certificado de cliente exigido pelo endpoint TLS da
+    /// AT (deve ser emitido por "AT Issuing CA1" ou "DGITA Issuing CA1").
+    /// Em testes: `keys/at_test_client.pfx` com a password publicada pela AT.
+    pub client_pfx_path: std::path::PathBuf,
+    /// Password do PFX. Para o cert público de testes da AT: `TESTEwebservice`.
+    #[serde(default)]
+    pub client_pfx_password: String,
+    #[serde(default)]
+    pub num_cert_sw_fatur: u32,
+}
+
 #[derive(Clone)]
 pub struct AppConfig {
     pub printer_output_path: std::path::PathBuf,
@@ -104,6 +124,9 @@ pub struct AppConfig {
     /// Usado para converter o relógio UTC armazenado na hora local da loja
     /// antes de aplicar o corte.
     pub business_day_tz_offset_minutes: i32,
+    /// Configuração do cliente AT SeriesWS. `None` desactiva os endpoints
+    /// REST relacionados (útil em ambientes onde o ws não está acessível).
+    pub at_series: Option<AtSeriesConfig>,
 }
 
 impl AppConfig {

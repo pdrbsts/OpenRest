@@ -1,0 +1,29 @@
+[package]
+name = "at-series"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# RSA/PKCS1 para cifrar o Nonce com a chave pública da AT.
+rsa = "0.9"
+# AES/ECB/PKCS5Padding para cifrar Password e Created com o Nonce como chave.
+aes = "0.8"
+ecb = "0.1"
+# Padding PKCS#7 (alias do PKCS#5 para blocos de 16 bytes em AES).
+cipher = { version = "0.4", features = ["block-padding"] }
+# SHA-256 para o Digest do PasswordDigest da AT.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+# mTLS: usamos native-tls (schannel no Windows, OpenSSL no Linux/macOS). O
+# endpoint :722 da AT exige certificado de cliente emitido por "AT Issuing CA1"
+# ou "DGITA Issuing CA1" — em testes usa-se o cert público `TesteWebservices.pfx`.
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+quick-xml = "0.36"
+
+[dev-dependencies]
+tokio = { workspace = true }

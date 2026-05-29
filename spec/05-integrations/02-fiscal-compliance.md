@@ -28,8 +28,8 @@
 ### 2.1 Séries
 
 Cada tipo de documento tem 1..N séries activas. Cada série tem:
-- Prefixo configurável (ex: "FT", "FS")
-- Ano em curso (geralmente um suffix `/2024`)
+- Prefixo configurável (ex: "FT", "FS", "FR")
+- Ano em curso (geralmente um suffix `/2026`)
 - Próximo número sequencial
 - Estado: activa / suspensa / encerrada
 
@@ -38,13 +38,13 @@ Cada tipo de documento tem 1..N séries activas. Cada série tem:
 - Numeração **estritamente sequencial** dentro da série. Sem gaps.
 - Não pode reutilizar números.
 - Anulação não remove número — emite-se Nota de Crédito.
-- Série deve ser **comunicada à AT antes** do primeiro documento.
+- Série tem obrigatóriamente que ser **comunicada à AT antes** do primeiro documento.
 
 ### 2.3 ATCUD
 
 Sigla: Código Único de Documento.
 Formato: `[ATCUD-Validacao]-[Numero]`
-Exemplo: `JFG3-12345`
+Exemplo: `JJSNSH5X-12345`
 
 `Validacao` é devolvido pela AT na comunicação da série.
 
@@ -144,7 +144,27 @@ OpenRest gera SAF-T automaticamente:
 
 Quando se cria nova série: webservice AT recebe e devolve `CodigoValidacao` (que vai compor ATCUD).
 
-Plug-in `comunicacao_series_at` faz isto.
+**Implementação OpenRest** (crate `at-series`, v0.5.0-alpha):
+
+| Operação | Endpoint SOAP | Persistência local |
+|---|---|---|
+| `registarSerie` | comunica série nova; AT devolve `codValidacaoSerie` (8 chars) | grava na tabela `atcud` (entrada activa por `tipo_doc + prefixo + ano`) |
+| `consultarSeries` | filtros opcionais (série, tipo, classe, datas, estado) | sem efeitos locais — apenas exibição |
+| `finalizarSerie` | marca série encerrada (com indicação do último doc emitido) | desactiva ATCUD local |
+| `anularSerie` | anula comunicação errónea (exige `declaracaoNaoEmissao=true`) | desactiva ATCUD local |
+
+**Autenticação WS-Security UsernameToken** (cifra híbrida específica AT):
+1. `Nonce` = 16 bytes aleatórios cifrados com `RSA/None/PKCS1Padding` usando a chave pública da AT do ambiente.
+2. `Password` = texto plano da password cifrado com `AES-128/ECB/PKCS5Padding` usando o Nonce como chave.
+3. `Created` (ISO 8601 com milissegundos, sufixo `Z`) cifrado também com AES/Nonce.
+
+Os três campos vão codificados em base64 dentro de `<wsse:UsernameToken>`.
+
+**Endpoints**:
+- Teste: `https://servicos.portaldasfinancas.gov.pt:722/SeriesWSService` com NIF público `599999993/0037`.
+- Produção: substitui-se endpoint, credenciais e `keys/at_test_public.pem` pela chave pública AT do ambiente real.
+
+**Endpoints REST OpenRest** (proxy autenticado): `POST /api/at-series/{registar,consultar,finalizar,anular}`. A UI vive em `apps/posto/src/AtSeriesView.tsx` (botão "Séries AT" na barra lateral).
 
 ### 6.2 Comunicação de documentos
 

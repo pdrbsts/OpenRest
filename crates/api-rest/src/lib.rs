@@ -19,6 +19,7 @@ use domain::{
     Transferencia, Zona, ZonaImpressao,
 };
 
+mod at_series;
 mod error;
 use error::ApiError;
 
@@ -139,6 +140,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/documents/:id/split", post(split_document_handler))
         .route("/api/documents/:id/split/auto-plan", get(auto_split_plan))
         .route("/api/documents/:id/print", post(print_document))
+        .route("/api/at-series/registar", post(at_series::registar))
+        .route("/api/at-series/consultar", post(at_series::consultar))
+        .route("/api/at-series/finalizar", post(at_series::finalizar))
+        .route("/api/at-series/anular", post(at_series::anular))
         .with_state(state)
         .layer(cors)
 }
@@ -1067,9 +1072,19 @@ async fn partial_close_document(
 }
 
 #[derive(Deserialize)]
-pub struct SplitRequest {
-    /// Atribuição explícita de linhas a cada filho. Comprimento define N.
-    pub assignments: Vec<SplitAssignmentRequest>,
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SplitRequest {
+    /// Modo Linhas (existing): cada linha vai inteira para uma conta. As
+    /// contas têm o total da soma das suas linhas (não necessariamente igual).
+    Lines { assignments: Vec<SplitAssignmentRequest> },
+    /// Modo Quantidades: cada linha elegível é dividida fraccionariamente em
+    /// `num_accounts` partes. Todas as contas ficam exactamente com o mesmo
+    /// total (o cêntimo residual é absorvido pelo pai).
+    Quantidades { num_accounts: usize },
+    /// Modo Encaixar: o operador atribui linhas a contas primárias; o sistema
+    /// gera linhas de compensação para igualar totais. Cada conta fica com
+    /// `total_elegível / N`.
+    Encaixar { assignments: Vec<SplitAssignmentRequest> },
 }
 
 #[derive(Deserialize)]
@@ -1082,30 +1097,51 @@ pub struct SplitResponse {
     pub children: Vec<DocumentResponse>,
 }
 
-/// Divide um documento em N filhos. O caller decide a atribuição (manual ou
-/// gerada via `auto-plan`). Cada filho fica aberto, pronto a ser fechado
-/// individualmente pelo endpoint `close`. O pai fica `is_closed=true` (sem
-/// dados fiscais) quando ficar sem linhas elegíveis; a mesa é libertada
-/// nesse momento.
+/// Divide um documento em N filhos. O `mode` selecciona a estratégia. Cada
+/// filho fica aberto, pronto a ser fechado individualmente pelo endpoint
+/// `close`. O pai fica `is_closed=true` sem dados fiscais quando ficar sem
+/// linhas elegíveis; a mesa é libertada nesse momento.
 async fn split_document_handler(
     State(state): State<Arc<AppState>>,
     Path(parent_id): Path<Uuid>,
     Json(req): Json<SplitRequest>,
 ) -> ApiResult<Json<SplitResponse>> {
-    if req.assignments.is_empty() {
-        return Err(ApiError::BadRequest(
-            "split requires at least one account".into(),
-        ));
-    }
-    let assignments: Vec<storage::SplitAssignment> = req
-        .assignments
-        .into_iter()
-        .map(|a| storage::SplitAssignment { line_ids: a.line_ids })
-        .collect();
     let pool = state.db.pool();
-    let children = storage::split_document(pool, parent_id, &assignments)
-        .await
-        .map_err(ApiError::from)?;
+    let children = match req {
+        SplitRequest::Lines { assignments } => {
+            if assignments.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "split requires at least one account".into(),
+                ));
+            }
+            let assignments: Vec<storage::SplitAssignment> = assignments
+                .into_iter()
+                .map(|a| storage::SplitAssignment { line_ids: a.line_ids })
+                .collect();
+            storage::split_document(pool, parent_id, &assignments)
+                .await
+                .map_err(ApiError::from)?
+        }
+        SplitRequest::Quantidades { num_accounts } => {
+            storage::split_document_quantidades(pool, parent_id, num_accounts)
+                .await
+                .map_err(ApiError::from)?
+        }
+        SplitRequest::Encaixar { assignments } => {
+            if assignments.len() < 2 {
+                return Err(ApiError::BadRequest(
+                    "encaixar requires at least 2 accounts".into(),
+                ));
+            }
+            let assignments: Vec<storage::SplitAssignment> = assignments
+                .into_iter()
+                .map(|a| storage::SplitAssignment { line_ids: a.line_ids })
+                .collect();
+            storage::split_document_encaixar(pool, parent_id, &assignments)
+                .await
+                .map_err(ApiError::from)?
+        }
+    };
     let mut out = Vec::with_capacity(children.len());
     for c in children {
         out.push(build_doc_response(pool, c).await?);
@@ -2070,8 +2106,8 @@ async fn print_document(
             .iter()
             .zip(articles.iter())
             .map(|(l, a)| devices::escpos::ReceiptLine {
-                name: &a.name,
-                qty: l.qty,
+                name: l.descricao.as_deref().unwrap_or(&a.name),
+                qty_milli: l.qty_milli,
                 unit_price: l.unit_price,
                 total: l.total,
                 vat_label: format!("{:.0}%", a.vat_rate as f64 / 100.0),

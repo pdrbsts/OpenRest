@@ -244,16 +244,24 @@ Fluxos:
 - Setas de transferência de artigos entre contas
 - Botão "Divisão Automática" tenta dividir mantendo o total da conta o mais próximo possível do pretendido
 
-> **Implementado** em v0.5.0-alpha. Endpoint `POST /api/documents/:id/split` body `{ assignments: [{ line_ids: […] }, …] }`: cria N filhos (um por entrada de `assignments`), redistribui as linhas. O pai fica **operacionalmente fechado** (`is_closed=true` sem dados fiscais) e a mesa é libertada quando todas as linhas elegíveis foram movidas; cada filho corre na cadeia fiscal de forma independente. `GET /api/documents/:id/split/auto-plan?num_accounts=N` devolve uma sugestão greedy/LPT (Longest Processing Time first) que minimiza a diferença máxima entre contas — a UI mostra o plano e o operador pode ajustar antes de confirmar.
+> **Implementado** em v0.5.0-alpha. Endpoint `POST /api/documents/:id/split` aceita três modos via discriminator `mode`:
+>
+> | Modo | Body | Comportamento |
+> |---|---|---|
+> | `lines` | `{ mode: "lines", assignments: [{ line_ids: […] }, …] }` | Cada linha vai inteira para uma só conta. Totais por conta podem diferir. |
+> | `quantidades` | `{ mode: "quantidades", num_accounts: N }` | Cada linha elegível é dividida fraccionariamente em N partes (cada filho recebe `qty_milli/N` e `total/N`). Cêntimos residuais ficam no pai → **todas as contas têm exactamente o mesmo total**. |
+> | `encaixar` | `{ mode: "encaixar", assignments: [{ line_ids: […] }, …] }` | Linhas atribuídas à conta "primária" ficam intactas; sistema gera linhas de compensação positivas/negativas (com `descricao="Compensação <artigo>"`) para igualar totais. Cada conta = `total_elegível/N`. |
+>
+> O pai fica **operacionalmente fechado** (`is_closed=true` sem dados fiscais) e a mesa é libertada quando todas as linhas elegíveis foram movidas; cada filho corre na cadeia fiscal de forma independente. `GET /api/documents/:id/split/auto-plan?num_accounts=N` devolve uma sugestão greedy/LPT (Longest Processing Time first) para o modo `lines`/`encaixar`.
 
 ##### Modelo pai/filho
 
 ```
 Document (pai, table_id=T, parent_document_id=NULL)
    ├─ DocumentDetail …  ← linhas originais
-   ↓ split / partial-close move linhas
+   ↓ split / partial-close move ou divide linhas
 Document (filho, table_id=NULL, parent_document_id=pai.id, hash/ATCUD próprios)
-   └─ DocumentDetail (referenciam o filho via UPDATE document_id)
+   └─ DocumentDetail (referenciam o filho via UPDATE document_id ou novas linhas)
 ```
 
 Invariantes:
@@ -262,9 +270,18 @@ Invariantes:
 * `mesa_estado.subtotal_actual` é decrementado pelo total movido quando linhas saem do pai.
 * Uma divisão exige no mínimo 2 linhas elegíveis (pedidas, não anuladas).
 
-##### Adiado para iteração seguinte
-- Divisão **fraccionária** ("0.5 café em cada uma das 2 contas") — requer migração de `document_details.qty` para milli-unidades ou um modelo de fracções.
-- Modo "Encaixar produtos" (linhas de compensação positivas/negativas) — requer artigo-sistema dedicado e suporte a `total` negativo nas linhas.
+##### Modelo de linhas fraccionárias
+
+Para suportar os modos **Quantidades** e **Encaixar**, as linhas têm:
+
+| Campo | Tipo | Semântica |
+|---|---|---|
+| `qty` | i32 | Quantidade inteira (legado/exibição quando inteiro). |
+| `qty_milli` | i64 | Quantidade em milli-unidades (1.000 = 1 unidade). Pode ser **fraccionária** (e.g., 500 = 0,5) ou **negativa** (compensações Encaixar). |
+| `total` | i64 cêntimos | Pode ser negativo (compensações). |
+| `descricao` | text? | Sobrepõe o nome do artigo no recibo. Usado para rotular linhas de compensação como "Compensação Café". |
+
+Cálculo de IVA: cada linha contribui para o bucket de IVA do seu `article_id`. Linhas de compensação positivas e negativas referenciam o mesmo artigo e cancelam-se entre contas, preservando o total de IVA do parente.
 
 ### 8.3 Conta Corrente do Cliente
 

@@ -1,4 +1,11 @@
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createResource,
+  createSignal,
+  For,
+  Show,
+} from "solid-js";
 import "./App.css";
 import {
   api,
@@ -16,13 +23,49 @@ import {
   TipoPreco,
   pvpFor,
 } from "./api";
+import { AtSeriesView } from "./AtSeriesView";
 import { ClientesView } from "./ClientesView";
 import { ConfigView } from "./ConfigView";
 import { CustomerPicker, DespachoView } from "./DeliveryView";
 
-type View = "tables" | "order" | "config" | "despacho" | "clientes";
+type View =
+  | "tables"
+  | "order"
+  | "config"
+  | "despacho"
+  | "clientes"
+  | "at-series";
 
 const fmtMoney = (cents: number) => (cents / 100).toFixed(2) + "€";
+
+// Formata qty_milli (1000 = 1 unidade). Inteiros saem como "3"; fraccionários
+// como "0.5", "0.25" etc. (sem zeros à direita); negativos preservam o sinal
+// para indicar linhas de compensação (modo Encaixar).
+const fmtQtyMilli = (qm: number): string => {
+  const sign = qm < 0 ? "-" : "";
+  const abs = Math.abs(qm);
+  const units = Math.floor(abs / 1000);
+  const frac = abs % 1000;
+  if (frac === 0) return `${sign}${units}`;
+  const s =
+    frac % 100 === 0
+      ? `${frac / 100}`
+      : frac % 10 === 0
+        ? `${(frac / 10).toString().padStart(2, "0")}`
+        : `${frac.toString().padStart(3, "0")}`;
+  return `${sign}${units}.${s}`;
+};
+
+// Rótulo da linha: usa descricao se preenchida (linhas geradas pelo Encaixar),
+// senão usa o nome do artigo. Centraliza a regra para reutilizar em todas as
+// renderizações de linhas (consulta, pedido, modais).
+const lineLabel = (
+  line: { article_id: string; descricao: string | null },
+  articleById: (id: string) => Article | undefined
+): string =>
+  line.descricao && line.descricao.trim().length > 0
+    ? line.descricao
+    : articleById(line.article_id)?.name ?? "Artigo";
 
 function familySubtree(families: Family[], rootId: string): Set<string> {
   const childrenOf = new Map<string | null, Family[]>();
@@ -55,7 +98,7 @@ function App() {
   const [selectedLocal, setSelectedLocal] = createSignal<string | null>(null);
 
   // pick first local by default once loaded
-  createMemo(() => {
+  createEffect(() => {
     if (selectedLocal() === null) {
       const list = locais();
       if (list && list.length > 0) setSelectedLocal(list[0].id);
@@ -358,19 +401,30 @@ function App() {
     }
   };
 
-  // Divisão de conta: cria N filhos com as linhas distribuídas conforme as
-  // `assignments`. Pai fica fechado (sem fiscal) quando ficar vazio. Após
-  // dividir, o utilizador volta à vista de mesas (os filhos serão fechados
-  // individualmente pela coluna de pedido — fora deste fluxo nesta iteração).
-  const splitDocument = async (
-    assignments: Array<{ line_ids: string[] }>
-  ) => {
+  // Divisão de conta: cria N filhos. Três modos:
+  //   - "lines": linhas inteiras vão a uma só conta (totais podem diferir)
+  //   - "quantidades": cada linha dividida fraccionariamente em N
+  //   - "encaixar": linhas atribuídas + sistema gera compensações para
+  //     igualar totais
+  // Pai fica fechado (sem fiscal) quando ficar vazio. Filhos serão fechados
+  // individualmente.
+  type SplitPayload =
+    | { mode: "lines"; assignments: Array<{ line_ids: string[] }> }
+    | { mode: "quantidades"; num_accounts: number }
+    | { mode: "encaixar"; assignments: Array<{ line_ids: string[] }> };
+  const splitDocument = async (payload: SplitPayload) => {
     const d = doc();
-    if (!d || assignments.length === 0) return;
+    if (!d) return;
     setError(null);
     setBusy(true);
     try {
-      await api.splitDocument(d.document.id, assignments);
+      if (payload.mode === "lines") {
+        await api.splitDocumentLines(d.document.id, payload.assignments);
+      } else if (payload.mode === "quantidades") {
+        await api.splitDocumentQuantidades(d.document.id, payload.num_accounts);
+      } else {
+        await api.splitDocumentEncaixar(d.document.id, payload.assignments);
+      }
       // O pai pode ter ficado split-closed; reavalia o estado.
       const parent = await api.document(d.document.id);
       setDoc(parent);
@@ -392,6 +446,7 @@ function App() {
         onConfig={() => setView("config")}
         onDespacho={() => setView("despacho")}
         onClientes={() => setView("clientes")}
+        onAtSeries={() => setView("at-series")}
         showDespacho={(locais() ?? []).some((l) => l.tipo === "delivery")}
       />
 
@@ -448,6 +503,10 @@ function App() {
 
           <Show when={view() === "clientes"}>
             <ClientesView />
+          </Show>
+
+          <Show when={view() === "at-series"}>
+            <AtSeriesView />
           </Show>
 
           <Show when={view() === "order" && activeTable()}>
@@ -507,8 +566,8 @@ function App() {
               doc()?.lines.find((l) => l.id === anularLineId())?.article_id ?? ""
             )?.name ?? "Artigo"
           }
-          qty={
-            doc()?.lines.find((l) => l.id === anularLineId())?.qty ?? 0
+          qtyMilli={
+            doc()?.lines.find((l) => l.id === anularLineId())?.qty_milli ?? 0
           }
           onCancel={() => setAnularLineId(null)}
           onConfirm={(com_desperdicio, motivo) =>
@@ -546,7 +605,7 @@ function App() {
 
 function AnularDialog(props: {
   articleName: string;
-  qty: number;
+  qtyMilli: number;
   onCancel: () => void;
   onConfirm: (comDesperdicio: boolean, motivo: string) => void;
 }) {
@@ -557,7 +616,7 @@ function AnularDialog(props: {
       <div class="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-md p-6 text-zinc-100">
         <h2 class="text-xl font-bold mb-1">Anular linha</h2>
         <p class="text-sm text-zinc-400 mb-4">
-          {props.qty}× {props.articleName}
+          {fmtQtyMilli(props.qtyMilli)}× {props.articleName}
         </p>
         <label class="flex items-center gap-2 mb-3 text-sm font-medium">
           <input
@@ -651,7 +710,7 @@ function TransferDialog(props: {
                         onChange={() => props.onToggleLine(line.id)}
                       />
                       <span class="font-bold text-blue-400 w-8">
-                        {line.qty}x
+                        {fmtQtyMilli(line.qty_milli)}x
                       </span>
                       <span class="truncate flex-1">
                         {props.articleById(line.article_id)?.name ?? "Artigo"}
@@ -724,6 +783,7 @@ function Sidebar(props: {
   onConfig: () => void;
   onDespacho: () => void;
   onClientes: () => void;
+  onAtSeries: () => void;
   showDespacho: boolean;
 }) {
   const active = "bg-blue-600 hover:bg-blue-500 text-white";
@@ -765,6 +825,14 @@ function Sidebar(props: {
         }`}
       >
         Clientes
+      </button>
+      <button
+        onClick={props.onAtSeries}
+        class={`w-16 h-16 rounded-xl transition-colors shadow-lg flex items-center justify-center font-semibold text-xs leading-tight ${
+          props.view === "at-series" ? active : inactive
+        }`}
+      >
+        Séries AT
       </button>
       <button
         onClick={props.onConfig}
@@ -967,7 +1035,12 @@ function OrderColumn(props: {
   onClose: (paymentMethodId: string | null) => void;
   onCloseMulti: (payments: PaymentLineInput[]) => void;
   onPartialClose: (lineIds: string[], payments: PaymentLineInput[]) => void;
-  onSplit: (assignments: Array<{ line_ids: string[] }>) => void;
+  onSplit: (
+    payload:
+      | { mode: "lines"; assignments: Array<{ line_ids: string[] }> }
+      | { mode: "quantidades"; num_accounts: number }
+      | { mode: "encaixar"; assignments: Array<{ line_ids: string[] }> }
+  ) => void;
 }) {
   const [selectedMethod, setSelectedMethod] = createSignal<string | "">("");
   const [receivedCents, setReceivedCents] = createSignal<number>(0);
@@ -984,7 +1057,7 @@ function OrderColumn(props: {
 
   return (
     <div class="w-80 bg-zinc-900 border-r border-zinc-700 flex flex-col relative">
-      <div class="p-4 border-b border-zinc-800 bg-zinc-900 sticky top-0">
+      <div class="p-4 border-b border-zinc-800 bg-zinc-900 shrink-0">
         <h2 class="text-xl font-bold text-zinc-200">Pedido Actual</h2>
       </div>
 
@@ -1013,18 +1086,18 @@ function OrderColumn(props: {
                   <div class="flex justify-between items-center">
                     <div class="flex items-center gap-3 min-w-0">
                       <span
-                        class={`text-sm font-bold w-6 text-center shrink-0 ${
+                        class={`text-sm font-bold text-center shrink-0 ${
                           anulada ? "text-red-400 line-through" : "text-blue-400"
                         }`}
                       >
-                        {line.qty}x
+                        {fmtQtyMilli(line.qty_milli)}x
                       </span>
                       <span
                         class={`text-sm truncate ${
                           anulada ? "text-zinc-500 line-through" : "text-zinc-200"
                         }`}
                       >
-                        {props.articleById(line.article_id)?.name ?? "Artigo"}
+                        {lineLabel(line, props.articleById)}
                       </span>
                       <Show when={pending && !anulada}>
                         <span class="text-[10px] uppercase tracking-wider text-amber-300 font-bold">
@@ -1081,13 +1154,11 @@ function OrderColumn(props: {
         </Show>
 
         <Show when={props.receipt}>
-          <pre class="mt-4 p-3 bg-black/50 text-emerald-300 text-xs whitespace-pre overflow-x-auto rounded-lg border border-emerald-900">
-{props.receipt}
-          </pre>
+          <pre class="mt-4 p-3 bg-black/50 text-emerald-300 text-xs whitespace-pre overflow-x-auto rounded-lg border border-emerald-900">{props.receipt}</pre>
         </Show>
       </div>
 
-      <div class="p-4 bg-zinc-800 border-t border-zinc-700 mt-auto">
+      <div class="p-4 bg-zinc-800 border-t border-zinc-700 mt-auto shrink-0 max-h-[65vh] overflow-y-auto">
         <div class="flex justify-between items-end mb-3">
           <span class="text-zinc-400 font-medium">Total</span>
           <span class="text-3xl font-bold tracking-tight text-white font-mono">
@@ -1292,9 +1363,9 @@ function OrderColumn(props: {
           articleById={props.articleById}
           busy={props.busy}
           onCancel={() => setShowSplit(false)}
-          onConfirm={(assignments) => {
+          onConfirm={(payload) => {
             setShowSplit(false);
-            props.onSplit(assignments);
+            props.onSplit(payload);
           }}
         />
       </Show>
@@ -1358,8 +1429,9 @@ function AdvancedPaymentModal(props: {
         { payment_method_id: methodId, amount: valueCents, descricao: desc },
       ];
     });
-    // Pré-preenche próxima linha com o valor em falta.
-    const next = Math.max(0, props.total - (sumCents() + valueCents));
+    // Pré-preenche próxima linha com o valor em falta. setRows já aplicou
+    // este valueCents, por isso sumCents() já o inclui — não somar de novo.
+    const next = Math.max(0, props.total - sumCents());
     setAmountInput((next / 100).toFixed(2));
     setDescInput("");
     setRows((curr) => {
@@ -1623,11 +1695,11 @@ function PartialPaymentModal(props: {
                         onChange={() => toggle(line.id)}
                         class="w-5 h-5"
                       />
-                      <span class="text-sm font-bold text-blue-400 w-6">
-                        {line.qty}x
+                      <span class="text-sm font-bold text-blue-400">
+                        {fmtQtyMilli(line.qty_milli)}x
                       </span>
                       <span class="text-sm text-zinc-100 truncate">
-                        {props.articleById(line.article_id)?.name ?? "Artigo"}
+                        {lineLabel(line, props.articleById)}
                       </span>
                     </div>
                     <span class="text-sm font-mono text-zinc-200">
@@ -1689,21 +1761,30 @@ function PartialPaymentModal(props: {
   );
 }
 
-// Divisão de Conta: o operador escolhe N contas, atribui cada linha pedida a
-// uma conta (manualmente, ou via botão "Distribuição Automática" que pede ao
-// servidor um plano greedy/LPT). Ao confirmar, o servidor cria N filhos com
-// as linhas distribuídas; o pai fica fechado (sem fiscal) se ficar vazio. Os
-// filhos serão fechados individualmente depois.
+type SplitMode = "lines" | "quantidades" | "encaixar";
+type SplitConfirmPayload =
+  | { mode: "lines"; assignments: Array<{ line_ids: string[] }> }
+  | { mode: "quantidades"; num_accounts: number }
+  | { mode: "encaixar"; assignments: Array<{ line_ids: string[] }> };
+
+// Divisão de Conta com três modos:
+//   * Linhas: cada linha vai inteira para uma só conta (totais podem diferir)
+//   * Quantidades: cada linha é dividida fraccionariamente em N partes
+//   * Encaixar: operador atribui linhas a contas primárias; sistema gera
+//     compensações para igualar totais
+// Ao confirmar, o servidor cria N filhos. O pai fica split-closed quando todas
+// as linhas elegíveis tiverem sido processadas.
 function SplitDocumentModal(props: {
   documentId: string;
   lines: DocumentDetail[];
   articleById: (id: string) => Article | undefined;
   busy: boolean;
   onCancel: () => void;
-  onConfirm: (assignments: Array<{ line_ids: string[] }>) => void;
+  onConfirm: (payload: SplitConfirmPayload) => void;
 }) {
+  const [mode, setMode] = createSignal<SplitMode>("lines");
   const [numAccounts, setNumAccounts] = createSignal<number>(2);
-  // Mapa lineId -> accountIndex (0-based). Inicialmente tudo na conta 0.
+  // Mapa lineId -> accountIndex (0-based). Usado em modos "lines" e "encaixar".
   const [assignment, setAssignment] = createSignal<Record<string, number>>(
     Object.fromEntries(props.lines.map((l) => [l.id, 0]))
   );
@@ -1711,10 +1792,24 @@ function SplitDocumentModal(props: {
   const accountIdxs = () =>
     Array.from({ length: numAccounts() }, (_, i) => i);
 
-  const accountTotal = (idx: number) =>
-    props.lines
+  const eligibleTotal = () => props.lines.reduce((s, l) => s + l.total, 0);
+
+  // Total de cada conta segundo o modo seleccionado.
+  const accountTotal = (idx: number): number => {
+    const m = mode();
+    if (m === "quantidades") {
+      // Cada conta paga floor(total/N); cêntimos residuais ficam no pai.
+      return Math.floor(eligibleTotal() / numAccounts());
+    }
+    if (m === "encaixar") {
+      // Cada conta paga sempre o target, independentemente da atribuição.
+      return Math.floor(eligibleTotal() / numAccounts());
+    }
+    // Modo "lines": soma das linhas atribuídas à conta.
+    return props.lines
       .filter((l) => assignment()[l.id] === idx)
       .reduce((s, l) => s + l.total, 0);
+  };
 
   const cycle = (lineId: string) => {
     setAssignment((curr) => {
@@ -1743,7 +1838,6 @@ function SplitDocumentModal(props: {
       plan.assignments.forEach((acc, idx) => {
         for (const lineId of acc.line_ids) next[lineId] = idx;
       });
-      // Linhas sem atribuição no plano ficam na conta 0.
       for (const l of props.lines) if (!(l.id in next)) next[l.id] = 0;
       setAssignment(next);
     } catch {
@@ -1751,18 +1845,34 @@ function SplitDocumentModal(props: {
     }
   };
 
-  const canConfirm = () =>
-    // Cada conta deve ter pelo menos uma linha (senão filho com total 0 não passa
-    // no fecho fiscal). Nesta iteração validamos com aviso visual.
-    accountIdxs().every((idx) => accountTotal(idx) > 0);
+  const needsAssignments = () => mode() === "lines" || mode() === "encaixar";
+
+  const canConfirm = () => {
+    if (mode() === "quantidades") return numAccounts() >= 2 && props.lines.length > 0;
+    // lines/encaixar: cada conta tem pelo menos uma linha atribuída.
+    if (mode() === "lines") {
+      return accountIdxs().every((idx) =>
+        props.lines.some((l) => assignment()[l.id] === idx)
+      );
+    }
+    // encaixar: cada conta tem pelo menos uma linha (a "primária"), senão o
+    // recibo de uma conta fica vazio (só compensações).
+    return accountIdxs().every((idx) =>
+      props.lines.some((l) => assignment()[l.id] === idx)
+    );
+  };
 
   const submit = () => {
-    const assignments: Array<{ line_ids: string[] }> = accountIdxs().map((idx) => ({
+    if (mode() === "quantidades") {
+      props.onConfirm({ mode: "quantidades", num_accounts: numAccounts() });
+      return;
+    }
+    const assignments = accountIdxs().map((idx) => ({
       line_ids: props.lines
         .filter((l) => assignment()[l.id] === idx)
         .map((l) => l.id),
     }));
-    props.onConfirm(assignments);
+    props.onConfirm({ mode: mode() as "lines" | "encaixar", assignments });
   };
 
   return (
@@ -1779,6 +1889,57 @@ function SplitDocumentModal(props: {
         </div>
 
         <div class="flex-1 overflow-y-auto p-5 space-y-4">
+          <div class="grid grid-cols-3 gap-2">
+            <button
+              onClick={() => setMode("lines")}
+              class={`py-2 px-3 rounded-lg text-sm font-semibold ${
+                mode() === "lines"
+                  ? "bg-blue-600 text-white"
+                  : "bg-zinc-700 hover:bg-zinc-600 text-zinc-100"
+              }`}
+            >
+              Linhas
+            </button>
+            <button
+              onClick={() => setMode("quantidades")}
+              class={`py-2 px-3 rounded-lg text-sm font-semibold ${
+                mode() === "quantidades"
+                  ? "bg-blue-600 text-white"
+                  : "bg-zinc-700 hover:bg-zinc-600 text-zinc-100"
+              }`}
+            >
+              Quantidades
+            </button>
+            <button
+              onClick={() => setMode("encaixar")}
+              class={`py-2 px-3 rounded-lg text-sm font-semibold ${
+                mode() === "encaixar"
+                  ? "bg-blue-600 text-white"
+                  : "bg-zinc-700 hover:bg-zinc-600 text-zinc-100"
+              }`}
+            >
+              Encaixar
+            </button>
+          </div>
+
+          <div class="text-xs text-zinc-400">
+            <Show when={mode() === "lines"}>
+              Cada linha vai inteira para uma só conta. Toca na linha para a
+              passar à próxima conta. Totais por conta podem diferir.
+            </Show>
+            <Show when={mode() === "quantidades"}>
+              Cada linha é dividida fraccionariamente em N partes iguais.
+              Cada conta paga exactamente o mesmo (cêntimo residual é
+              absorvido pelo pai).
+            </Show>
+            <Show when={mode() === "encaixar"}>
+              Atribui cada linha a uma conta "primária"; sistema gera linhas
+              de compensação (positivas e negativas) para igualar totais.
+              Cada conta paga o mesmo, mas o recibo da primária mostra o
+              artigo completo + compensação.
+            </Show>
+          </div>
+
           <div class="flex items-center gap-3">
             <span class="text-zinc-300 text-sm">Nº contas</span>
             <button
@@ -1798,13 +1959,15 @@ function SplitDocumentModal(props: {
             >
               +
             </button>
-            <button
-              onClick={autoDistribute}
-              disabled={props.busy}
-              class="ml-auto px-3 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-semibold"
-            >
-              Distribuição Automática
-            </button>
+            <Show when={needsAssignments()}>
+              <button
+                onClick={autoDistribute}
+                disabled={props.busy}
+                class="ml-auto px-3 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-semibold"
+              >
+                Distribuição Automática
+              </button>
+            </Show>
           </div>
 
           <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
@@ -1828,42 +1991,44 @@ function SplitDocumentModal(props: {
             </For>
           </div>
 
-          <div class="text-xs text-zinc-400">
-            Toca numa linha para passá-la à próxima conta (1 → 2 → … → N → 1).
-          </div>
+          <Show when={needsAssignments()}>
+            <div class="text-xs text-zinc-400">
+              Toca numa linha para passá-la à próxima conta (1 → 2 → … → N → 1).
+            </div>
 
-          <div class="space-y-1">
-            <For each={props.lines}>
-              {(line) => {
-                const idx = () => assignment()[line.id] ?? 0;
-                return (
-                  <button
-                    onClick={() => cycle(line.id)}
-                    class="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700"
-                  >
-                    <div class="flex items-center gap-3 min-w-0">
-                      <span class="text-xs uppercase font-bold text-indigo-300 w-16 text-left">
-                        Conta {idx() + 1}
+            <div class="space-y-1">
+              <For each={props.lines}>
+                {(line) => {
+                  const idx = () => assignment()[line.id] ?? 0;
+                  return (
+                    <button
+                      onClick={() => cycle(line.id)}
+                      class="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700"
+                    >
+                      <div class="flex items-center gap-3 min-w-0">
+                        <span class="text-xs uppercase font-bold text-indigo-300 w-16 text-left">
+                          Conta {idx() + 1}
+                        </span>
+                        <span class="text-sm font-bold text-blue-400">
+                          {fmtQtyMilli(line.qty_milli)}x
+                        </span>
+                        <span class="text-sm text-zinc-100 truncate">
+                          {lineLabel(line, props.articleById)}
+                        </span>
+                      </div>
+                      <span class="text-sm font-mono text-zinc-200">
+                        {fmtMoney(line.total)}
                       </span>
-                      <span class="text-sm font-bold text-blue-400 w-6">
-                        {line.qty}x
-                      </span>
-                      <span class="text-sm text-zinc-100 truncate">
-                        {props.articleById(line.article_id)?.name ?? "Artigo"}
-                      </span>
-                    </div>
-                    <span class="text-sm font-mono text-zinc-200">
-                      {fmtMoney(line.total)}
-                    </span>
-                  </button>
-                );
-              }}
-            </For>
-          </div>
+                    </button>
+                  );
+                }}
+              </For>
+            </div>
+          </Show>
         </div>
 
         <div class="px-5 py-4 border-t border-zinc-800 flex gap-2 justify-end items-center">
-          <Show when={!canConfirm()}>
+          <Show when={!canConfirm() && needsAssignments()}>
             <span class="text-xs text-amber-300 mr-auto">
               Cada conta tem de ter pelo menos uma linha.
             </span>

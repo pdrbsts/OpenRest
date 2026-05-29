@@ -9,6 +9,7 @@ storage = { path = "../storage" }
 server = { path = "../server" }
 devices = { path = "../devices" }
 fiscal = { path = "../fiscal" }
+at-series = { path = "../at-series" }
 axum = "0.7"
 tokio = { workspace = true }
 serde = { workspace = true }

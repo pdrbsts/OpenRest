@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use server::{AppConfig, AppState, CompanyConfig};
+use server::{AppConfig, AppState, AtSeriesConfig, CompanyConfig};
 use storage::Database;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -19,6 +19,7 @@ struct BackendConfig {
     registar_cancelamentos: bool,
     company: CompanyConfig,
     business_day: BusinessDayConfig,
+    at_series: Option<AtSeriesConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -41,6 +42,7 @@ impl Default for BackendConfig {
             registar_cancelamentos: false,
             company: CompanyConfig::default(),
             business_day: BusinessDayConfig::default(),
+            at_series: None,
         }
     }
 }
@@ -111,6 +113,12 @@ async fn main() -> Result<()> {
         cfg.business_day.tz_offset_minutes
     );
 
+    if cfg.at_series.is_some() {
+        tracing::info!("AT SeriesWS configurado — endpoints /api/at-series activos");
+    } else {
+        tracing::info!("AT SeriesWS não configurado — endpoints /api/at-series devolverão 503");
+    }
+
     let app_config = AppConfig {
         printer_output_path: PathBuf::from(&cfg.printer_output_path),
         terminal_label: cfg.terminal_label,
@@ -119,6 +127,7 @@ async fn main() -> Result<()> {
         registar_cancelamentos: cfg.registar_cancelamentos,
         business_day_cutoff_minutes: cutoff_minutes,
         business_day_tz_offset_minutes: cfg.business_day.tz_offset_minutes,
+        at_series: cfg.at_series,
     };
 
     let state = Arc::new(AppState::new(db, app_config));
