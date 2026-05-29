@@ -1,7 +1,12 @@
 @import "tailwindcss";
 
 @layer base {
+  html,
+  body,
+  #root {
+    @apply h-screen w-screen overflow-hidden;
+  }
   body {
-    @apply bg-zinc-900 text-zinc-100 font-sans h-screen w-screen overflow-hidden;
+    @apply bg-zinc-900 text-zinc-100 font-sans;
   }
 }

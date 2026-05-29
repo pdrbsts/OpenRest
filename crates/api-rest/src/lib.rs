@@ -570,10 +570,13 @@ async fn open_table(
     Path(id): Path<Uuid>,
     body: Option<Json<OpenTableRequest>>,
 ) -> ApiResult<Json<DocumentResponse>> {
+    let pool = state.db.pool();
     let employee_id = body.and_then(|b| b.employee_id);
+    // Spec §4 (Sessões de Empregado): só se entra numa mesa com sessão aberta.
+    require_open_sessao(pool, employee_id).await?;
     let business_date = state.config.business_day(Utc::now());
     let document =
-        storage::open_table(state.db.pool(), id, employee_id, business_date).await?;
+        storage::open_table(pool, id, employee_id, business_date).await?;
     let _ = state
         .event_bus
         .publish(SystemEvent::DocumentCreated { document_id: document.id });
@@ -648,6 +651,21 @@ async fn require_nivel(
         .nivel_acesso_id
         .ok_or_else(|| ApiError::Forbidden("employee has no nivel_acesso".into()))?;
     Ok(storage::get_nivel_acesso(pool, nivel_id).await?)
+}
+
+/// Spec §4: garante que o empregado está identificado e tem sessão aberta.
+/// 400 se faltar `employee_id`, 403 se não houver sessão aberta.
+async fn require_open_sessao(
+    pool: &storage::sqlx::SqlitePool,
+    employee_id: Option<Uuid>,
+) -> ApiResult<SessaoEmpregado> {
+    let employee_id =
+        employee_id.ok_or_else(|| ApiError::BadRequest("employee_id is required".into()))?;
+    storage::get_open_sessao_for_employee(pool, employee_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::Forbidden("empregado sem sessão aberta — abra sessão primeiro".into())
+        })
 }
 
 #[derive(Deserialize, Default)]

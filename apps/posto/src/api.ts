@@ -162,6 +162,28 @@ export interface Employee {
   base_consumo: number;
 }
 
+export interface SessaoEmpregado {
+  id: string;
+  empregado_id: string;
+  data_dia: string;
+  com_bolsa: boolean;
+  fundo_bolsa: number;
+  observacao_abertura: string | null;
+  observacao_fecho: string | null;
+  aberta_em: string;
+  aberta_por: string | null;
+  fechada_em: string | null;
+  fechada_por: string | null;
+}
+
+export interface OpenSessaoInput {
+  empregado_id: string;
+  com_bolsa?: boolean;
+  fundo_bolsa?: number;
+  observacao?: string | null;
+  aberta_por?: string | null;
+}
+
 export interface Customer {
   id: string;
   codigo: number | null;
@@ -407,6 +429,24 @@ export const api = {
   tables: () => jsonReq<Table[]>("/api/tables"),
   employees: () => jsonReq<Employee[]>("/api/employees"),
   paymentMethods: () => jsonReq<PaymentMethod[]>("/api/payment-methods"),
+
+  // --- Sessões de empregado ---
+  openSessaoForEmployee: (employeeId: string) =>
+    jsonReq<SessaoEmpregado | null>(`/api/employees/${employeeId}/sessao-aberta`),
+  listSessoes: (apenasAbertas = false) =>
+    jsonReq<SessaoEmpregado[]>(
+      `/api/sessoes?apenas_abertas=${apenasAbertas ? "true" : "false"}`
+    ),
+  openSessao: (body: OpenSessaoInput) =>
+    jsonReq<SessaoEmpregado>("/api/sessoes", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  closeSessao: (id: string, body?: { observacao?: string | null; fechada_por?: string | null }) =>
+    jsonReq<SessaoEmpregado>(`/api/sessoes/${id}/fechar`, {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+    }),
 
   customers: () => jsonReq<Customer[]>("/api/customers"),
   searchCustomers: (params: { phone?: string; name?: string }) => {

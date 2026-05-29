@@ -19,6 +19,7 @@ import {
   Local,
   PaymentLineInput,
   PaymentMethod,
+  SessaoEmpregado,
   Table,
   TipoPreco,
   pvpFor,
@@ -125,6 +126,43 @@ function App() {
   const [view, setView] = createSignal<View>("tables");
   const [showCustomerPicker, setShowCustomerPicker] = createSignal(false);
 
+  // Sessão de empregado (spec §4): nenhuma operação de sala sem sessão aberta.
+  const [currentEmployee, setCurrentEmployee] = createSignal<Employee | null>(
+    null
+  );
+  const [currentSessao, setCurrentSessao] = createSignal<SessaoEmpregado | null>(
+    null
+  );
+
+  // Logout: volta ao portão sem fechar a sessão (spec §4.2 — a sessão fica
+  // aberta no servidor e é retomada no próximo login).
+  const logout = () => {
+    setActiveTable(null);
+    setDoc(null);
+    setReceipt(null);
+    setError(null);
+    setView("tables");
+    setCurrentEmployee(null);
+    setCurrentSessao(null);
+  };
+
+  // Fecha a sessão no servidor (valida que não há mesas/documentos por fechar)
+  // e regressa ao portão.
+  const fecharSessao = async () => {
+    const s = currentSessao();
+    if (!s) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await api.closeSessao(s.id, { fechada_por: currentEmployee()?.id ?? null });
+      logout();
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const currentLocal = createMemo(() =>
     (locais() ?? []).find((l) => l.id === selectedLocal())
   );
@@ -214,7 +252,7 @@ function App() {
     setReceipt(null);
     setBusy(true);
     try {
-      const d = await api.openTable(t.id, null);
+      const d = await api.openTable(t.id, currentEmployee()?.id ?? null);
       setActiveTable(t);
       setDoc(d);
       setView("order");
@@ -437,6 +475,20 @@ function App() {
   };
 
   return (
+    <Show
+      when={currentSessao()}
+      fallback={
+        <SessionGate
+          employees={employees() ?? []}
+          loading={employees.loading}
+          onReady={(emp, sessao) => {
+            setCurrentEmployee(emp);
+            setCurrentSessao(sessao);
+            setView("tables");
+          }}
+        />
+      }
+    >
     <div class="flex h-full w-full bg-zinc-900 text-white select-none">
       <Sidebar
         view={view()}
@@ -456,6 +508,10 @@ function App() {
           activeTable={activeTable()}
           dataDia={currentDay()?.data_dia ?? null}
           onBack={view() === "order" ? backToTables : undefined}
+          employeeName={currentEmployee()?.name ?? null}
+          busy={busy()}
+          onLogout={logout}
+          onCloseSession={fecharSessao}
         />
 
         <Show when={error()}>
@@ -600,6 +656,7 @@ function App() {
         />
       </Show>
     </div>
+    </Show>
   );
 }
 
@@ -851,6 +908,10 @@ function TopBar(props: {
   activeTable: Table | null;
   dataDia: string | null;
   onBack?: () => void;
+  employeeName?: string | null;
+  busy?: boolean;
+  onLogout?: () => void;
+  onCloseSession?: () => void;
 }) {
   const civilDate = () => new Date().toLocaleDateString();
   const dataDiaShifted = () =>
@@ -888,6 +949,183 @@ function TopBar(props: {
           </span>
         </Show>
         <span class="text-zinc-500">{civilDate()}</span>
+        <Show when={props.employeeName}>
+          <span
+            class="px-2 py-0.5 rounded bg-blue-900/40 text-blue-200 border border-blue-700/50"
+            title="Sessão de empregado aberta"
+          >
+            {props.employeeName}
+          </span>
+          <button
+            onClick={props.onLogout}
+            disabled={props.busy}
+            class="px-2 py-0.5 rounded-md bg-zinc-700 hover:bg-zinc-600 text-xs font-sans disabled:opacity-50"
+            title="Trocar de empregado (mantém a sessão aberta)"
+          >
+            Trocar
+          </button>
+          <button
+            onClick={props.onCloseSession}
+            disabled={props.busy}
+            class="px-2 py-0.5 rounded-md bg-red-800 hover:bg-red-700 text-xs font-sans disabled:opacity-50"
+            title="Fechar sessão"
+          >
+            Fechar sessão
+          </button>
+        </Show>
+      </div>
+    </div>
+  );
+}
+
+// Portão de sessão (spec §4): ecrã inicial obrigatório. Sem sessão aberta o
+// empregado não acede à zona de operação. Identifica-se escolhendo o
+// empregado; retoma sessão já aberta ou abre uma nova (com bolsa opcional).
+function SessionGate(props: {
+  employees: Employee[];
+  loading: boolean;
+  onReady: (employee: Employee, sessao: SessaoEmpregado) => void;
+}) {
+  const [picked, setPicked] = createSignal<Employee | null>(null);
+  const [comBolsa, setComBolsa] = createSignal(false);
+  const [fundo, setFundo] = createSignal("0.00");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  const pick = async (emp: Employee) => {
+    setError(null);
+    setBusy(true);
+    try {
+      // Retoma sessão já aberta (ex.: após recarregar a aplicação).
+      const existing = await api.openSessaoForEmployee(emp.id);
+      if (existing) {
+        props.onReady(emp, existing);
+        return;
+      }
+      setPicked(emp);
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const abrir = async () => {
+    const emp = picked();
+    if (!emp) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const sessao = await api.openSessao({
+        empregado_id: emp.id,
+        com_bolsa: comBolsa(),
+        fundo_bolsa: comBolsa()
+          ? Math.round(parseFloat(fundo() || "0") * 100)
+          : 0,
+      });
+      props.onReady(emp, sessao);
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="flex h-full w-full items-center justify-center bg-zinc-900 text-white select-none">
+      <div class="w-full max-w-2xl p-8">
+        <h1 class="text-3xl font-bold text-center mb-1">OpenRest</h1>
+        <p class="text-center text-zinc-400 mb-6">
+          {picked()
+            ? `Abrir sessão — ${picked()!.name}`
+            : "Escolhe o empregado para abrir sessão"}
+        </p>
+
+        <Show when={error()}>
+          <div class="mb-4 px-3 py-2 bg-red-900/40 border border-red-700 text-red-200 text-sm rounded-md">
+            {error()}
+          </div>
+        </Show>
+
+        <Show
+          when={picked()}
+          fallback={
+            <Show
+              when={!props.loading}
+              fallback={<div class="text-zinc-400 text-center">A carregar…</div>}
+            >
+              <Show
+                when={props.employees.length > 0}
+                fallback={
+                  <div class="text-zinc-500 text-center italic">
+                    Sem empregados configurados.
+                  </div>
+                }
+              >
+                <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                  <For each={props.employees}>
+                    {(emp) => (
+                      <button
+                        onClick={() => pick(emp)}
+                        disabled={busy()}
+                        class="aspect-square rounded-2xl bg-zinc-800 border border-zinc-700 hover:border-blue-500 hover:bg-zinc-700 p-4 flex flex-col justify-between items-start text-left shadow-md transition-all active:scale-95 disabled:opacity-50"
+                      >
+                        <span class="text-lg font-bold leading-tight">
+                          {emp.name}
+                        </span>
+                        <span class="text-xs font-mono text-zinc-400">
+                          #{emp.code}
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </Show>
+          }
+        >
+          <div class="bg-zinc-800 border border-zinc-700 rounded-xl p-6 space-y-4">
+            <label class="flex items-center gap-2 text-sm font-medium">
+              <input
+                type="checkbox"
+                class="w-4 h-4"
+                checked={comBolsa()}
+                onChange={(e) => setComBolsa(e.currentTarget.checked)}
+              />
+              Abrir com bolsa (fundo de caixa)
+            </label>
+            <Show when={comBolsa()}>
+              <label class="flex flex-col gap-1 text-sm font-medium">
+                Fundo inicial (€)
+                <input
+                  type="number"
+                  inputmode="decimal"
+                  step="0.01"
+                  min="0"
+                  value={fundo()}
+                  onInput={(e) => setFundo(e.currentTarget.value)}
+                  class="bg-zinc-900 rounded-md px-3 py-2 border border-zinc-700 font-mono w-40"
+                />
+              </label>
+            </Show>
+            <div class="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setPicked(null)}
+                disabled={busy()}
+                class="px-4 py-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-sm font-semibold disabled:opacity-50"
+              >
+                Voltar
+              </button>
+              <button
+                onClick={abrir}
+                disabled={busy()}
+                class="px-5 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-bold disabled:opacity-50"
+              >
+                Abrir sessão
+              </button>
+            </div>
+          </div>
+        </Show>
       </div>
     </div>
   );
@@ -1056,12 +1294,12 @@ function OrderColumn(props: {
   const setExact = () => setReceivedCents(total());
 
   return (
-    <div class="w-80 bg-zinc-900 border-r border-zinc-700 flex flex-col relative">
+    <div class="w-80 bg-zinc-900 border-r border-zinc-700 flex flex-col relative h-full overflow-hidden">
       <div class="p-4 border-b border-zinc-800 bg-zinc-900 shrink-0">
         <h2 class="text-xl font-bold text-zinc-200">Pedido Actual</h2>
       </div>
 
-      <div class="flex-1 overflow-y-auto p-4 space-y-2">
+      <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-2">
         <Show
           when={(props.doc?.lines.length ?? 0) > 0}
           fallback={
@@ -1158,7 +1396,7 @@ function OrderColumn(props: {
         </Show>
       </div>
 
-      <div class="p-4 bg-zinc-800 border-t border-zinc-700 mt-auto shrink-0 max-h-[65vh] overflow-y-auto">
+      <div class="p-4 bg-zinc-800 border-t border-zinc-700 shrink-0">
         <div class="flex justify-between items-end mb-3">
           <span class="text-zinc-400 font-medium">Total</span>
           <span class="text-3xl font-bold tracking-tight text-white font-mono">
